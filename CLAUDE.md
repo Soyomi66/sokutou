@@ -6,7 +6,7 @@ Qwen3-TTS 12Hz の 0.6B・1.7B CustomVoice にも対応した（2026-11-11、`qw
 
 Fish Audio Drama 3（`fishaudio/drama-3`）にも対応した（2026-11-11、`drama3/`）。公式の実装（fish-speech 0f8a12e、torch 2.8.0）のイメージは `docker/drama3.Dockerfile`（`scripts/build_drama3.sh`）で作り、スクリプトは `PYTHON=/opt/fish-speech/.venv/bin/python IMAGE=sokutou/drama3-dev:0f8a12e scripts/run_in_image.sh drama3/<スクリプト>` で動かす。サーバーは `drama3/serve.py`（既定のポート 18098、重みは int8）で、GPU のメモリーを約 45 GiB 使う（48 GiB の GPU で、残りは 2〜3 GiB）。確かめは、層ごと・教師強制・サンプリング・最初の入力（`drama3/check.py`）と、CER と声の近さ（`drama3/summary.py`）で行う。
 - ライセンスの表示は speech.cpp と同じ形にした（2026-11-11 に利用者が決めた）。`drama3/` は MIT のままにする。fish-speech のコードは写さず、実行するときに呼ぶ。fish-speech・重み・コーデックは Fish Audio Community License なので、リポジトリに入れない（イメージを作るときに取得する）。
-- README で Drama 3 を紹介するところには「Built with Fish Audio」を添え、FACL の要約は README の「ライセンス」の節と LICENSE の注記に書く。FACL の写しと Notice のファイルはリポジトリに置かず、イメージを配るときに付ける。
+- README と `docs/models/drama3.md` で Drama 3 を紹介するところには「Built with Fish Audio」を添え、FACL の要約は README の「ライセンス」の節と LICENSE の注記に書く。FACL の写しと Notice のファイルはリポジトリに置かず、イメージを配るときに付ける。
 - Drama 3 の参照には書き起こしが要る。WAV と同じ名前の書き起こし（.lab）を `runs/dev/voices/<声>/` に置き、`VOICES=runs/dev/voices` で渡す（`voices/` の WAV も、ここに写して使う。書き起こしは参照の派生物なので git に入れない）。
 
 GPU の割り当てと本番のサーバーの決まりは、このマシンだけの `CLAUDE.local.md` にある。そのファイルがないとき（別のマシンや worktree）は、GPU を使う前とサーバーを動かす前に、どの GPU とポートを使ってよいかを利用者に聞く。
@@ -36,6 +36,7 @@ GPU の割り当てと本番のサーバーの決まりは、このマシンだ�
 ## 参照先
 
 - 使い方と結果の要約: `README.md`、`docs/results.md`
+- Qwen3-TTS と Drama 3 の動かし方・API・仕組み・できないこと: `docs/models/qwen3-tts.md`、`docs/models/drama3.md`
 - 実装前の方式の比較: `docs/design.md`
 - 公式の実装のプロファイルと基準の数値: `docs/baseline.md`
 - 進み具合: `TASKS.md`（終えたらチェックし、見つけた作業を足す）

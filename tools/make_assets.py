@@ -5,7 +5,7 @@
 書き出すのは次の 5 つ。
 - `assets/icon.svg`: README の先頭のアイコン。記号だけで、地は透明
 - `assets/avatar.svg`、`assets/avatar.png`（1024×1024）: 1:1 のアイコン。白い地に記号を置き、円に切り抜かれても欠けない余白を取る
-- `assets/speed-light.svg`、`assets/speed-dark.svg`: README の「速さ」の棒グラフ
+- `assets/speed-light.svg`、`assets/speed-dark.svg`: README の先頭にある、速さの棒グラフ
 
 グラフの値は `docs/results.md` の「速さ」の表（v4.1-Small、MF 版、v4-Large）の中央値から読む。
 そのあと、README のグラフの alt 文が同じ値になっているかを確かめ、違えば正しい alt 文を出して 1 で終わる。

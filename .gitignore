@@ -1,0 +1,24 @@
+# 計測と参照の出力。参照音声から作った潜在変数・話者の状態・合成音声を含むので、git に入れない。
+runs/
+# 参照音声（<声の名前>/*.wav）。scripts/run_in_image.sh の既定の置き場所
+/voices
+# Drama 3 の参照音声と書き起こし（<声の名前>/*.wav と *.lab）。README の例の置き場所
+/drama3-voices
+*.lab
+# このマシンだけの決まり（Claude Code が CLAUDE.md と一緒に読む）
+CLAUDE.local.md
+*.wav
+*.npz
+*.npy
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.nsys-rep
+*.json.gz
+__pycache__/
+.venv/
+build/
+
+# yomiyasu の検査の記録
+.yomiyasu/

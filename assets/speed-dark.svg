@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 540" width="520" height="540" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans CJK JP', 'Yu Gothic UI', Meiryo, sans-serif">
+<title id="t">1 文の合成にかかる時間（中央値）</title>
+<desc id="d">v4.1-Small（20 ステップ）: sokutou 0.059 秒、speech.cpp 0.221 秒、公式の実装 0.418 秒。v4.1-Small-MF（4 ステップ）: sokutou 0.028 秒、speech.cpp 0.075 秒、公式の実装 0.134 秒。v4-Large（20 ステップ）: sokutou 0.198 秒、speech.cpp 0.453 秒、公式の実装 1.099 秒。</desc>
+<text x="16" y="28" font-size="19" font-weight="600" fill="#f0f6fc">1 文の合成にかかる時間（中央値）</text>
+<text x="16" y="56" font-size="14" fill="#9198a1">RTX 6000 Ada で 192 回測った中央値。短いほど速い</text>
+<text x="16" y="92" font-size="15" font-weight="600" fill="#f0f6fc">v4.1-Small（20 ステップ）</text>
+<text x="106" y="116.0" dy="0.35em" text-anchor="end" font-size="15" fill="#f0f6fc" font-weight="600">sokutou</text>
+<path d="M116.00 108.00H156.60A4 4 0 0 1 160.60 112.00V120.00A4 4 0 0 1 156.60 124.00H116.00Z" fill="#e0482a"/>
+<text x="168.60" y="116.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#f0f6fc" font-weight="600">0.059 秒</text>
+<text x="106" y="148.0" dy="0.35em" text-anchor="end" font-size="15" fill="#9198a1">speech.cpp</text>
+<path d="M116.00 140.00H279.07A4 4 0 0 1 283.07 144.00V152.00A4 4 0 0 1 279.07 156.00H116.00Z" fill="#656c76"/>
+<text x="291.07" y="148.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#9198a1">0.221 秒</text>
+<text x="106" y="180.0" dy="0.35em" text-anchor="end" font-size="15" fill="#9198a1">公式の実装</text>
+<path d="M116.00 172.00H428.00A4 4 0 0 1 432.00 176.00V184.00A4 4 0 0 1 428.00 188.00H116.00Z" fill="#656c76"/>
+<text x="440.00" y="180.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#9198a1">0.418 秒</text>
+<line x1="115.5" x2="115.5" y1="104" y2="192" stroke="#3d444d" stroke-width="1"/>
+<text x="16" y="228" font-size="15" font-weight="600" fill="#f0f6fc">v4.1-Small-MF（4 ステップ）</text>
+<text x="106" y="252.0" dy="0.35em" text-anchor="end" font-size="15" fill="#f0f6fc" font-weight="600">sokutou</text>
+<path d="M116.00 244.00H178.03A4 4 0 0 1 182.03 248.00V256.00A4 4 0 0 1 178.03 260.00H116.00Z" fill="#e0482a"/>
+<text x="190.03" y="252.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#f0f6fc" font-weight="600">0.028 秒</text>
+<text x="106" y="284.0" dy="0.35em" text-anchor="end" font-size="15" fill="#9198a1">speech.cpp</text>
+<path d="M116.00 276.00H288.87A4 4 0 0 1 292.87 280.00V288.00A4 4 0 0 1 288.87 292.00H116.00Z" fill="#656c76"/>
+<text x="300.87" y="284.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#9198a1">0.075 秒</text>
+<text x="106" y="316.0" dy="0.35em" text-anchor="end" font-size="15" fill="#9198a1">公式の実装</text>
+<path d="M116.00 308.00H428.00A4 4 0 0 1 432.00 312.00V320.00A4 4 0 0 1 428.00 324.00H116.00Z" fill="#656c76"/>
+<text x="440.00" y="316.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#9198a1">0.134 秒</text>
+<line x1="115.5" x2="115.5" y1="240" y2="328" stroke="#3d444d" stroke-width="1"/>
+<text x="16" y="364" font-size="15" font-weight="600" fill="#f0f6fc">v4-Large（20 ステップ）</text>
+<text x="106" y="388.0" dy="0.35em" text-anchor="end" font-size="15" fill="#f0f6fc" font-weight="600">sokutou</text>
+<path d="M116.00 380.00H168.93A4 4 0 0 1 172.93 384.00V392.00A4 4 0 0 1 168.93 396.00H116.00Z" fill="#e0482a"/>
+<text x="180.93" y="388.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#f0f6fc" font-weight="600">0.198 秒</text>
+<text x="106" y="420.0" dy="0.35em" text-anchor="end" font-size="15" fill="#9198a1">speech.cpp</text>
+<path d="M116.00 412.00H242.25A4 4 0 0 1 246.25 416.00V424.00A4 4 0 0 1 242.25 428.00H116.00Z" fill="#656c76"/>
+<text x="254.25" y="420.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#9198a1">0.453 秒</text>
+<text x="106" y="452.0" dy="0.35em" text-anchor="end" font-size="15" fill="#9198a1">公式の実装</text>
+<path d="M116.00 444.00H428.00A4 4 0 0 1 432.00 448.00V456.00A4 4 0 0 1 428.00 460.00H116.00Z" fill="#656c76"/>
+<text x="440.00" y="452.0" dy="0.35em" font-size="15" style="font-variant-numeric:tabular-nums" fill="#9198a1">1.099 秒</text>
+<line x1="115.5" x2="115.5" y1="376" y2="464" stroke="#3d444d" stroke-width="1"/>
+<text x="16" y="504" font-size="13" fill="#9198a1">speech.cpp は v0.10.1（Vulkan、F16）で、HTTP を含む値</text>
+<text x="16" y="524" font-size="13" fill="#9198a1">棒の目盛りはモデルごとに違う</text>
+</svg>

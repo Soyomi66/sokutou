@@ -1,0 +1,77 @@
+MIT License
+
+Copyright (c) 2026 kosuketut
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party notice
+
+engine/ re-implements parts of the inference of Irodori-TTS
+(https://github.com/Aratako/Irodori-TTS) and calls its modules at run time.
+Irodori-TTS is distributed under the following license:
+
+MIT License
+
+Copyright (c) 2026 Aratako
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party notice
+
+qwen3/ re-implements parts of the inference of qwen-tts 0.1.1
+(https://github.com/Qwen/Qwen3-TTS, Copyright 2026 The Alibaba Qwen team)
+and calls its modules at run time. qwen-tts is distributed under the
+Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+---
+
+Third-party notice
+
+drama3/ re-implements parts of the inference of Fish Audio Drama 3
+(https://huggingface.co/fishaudio/drama-3) and calls the modules of
+fish-speech (https://github.com/fishaudio/fish-speech) at run time. This
+repository contains no fish-speech code, model weights or codec. Fish Audio
+Drama 3, its codec and fish-speech belong to Fish Audio (39 AI, INC.) and
+are licensed under the Fish Audio Community License, Version 1.0
+(https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE), not under the
+MIT License above. Images built with scripts/build_drama3.sh include
+fish-speech; distribute such an image only with a copy of that license and
+its Notice file.
+
+Built with Fish Audio.

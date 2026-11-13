@@ -16,7 +16,7 @@
   <a href="docs/results.md">結果の詳細</a>
 </p>
 
-sokutou は [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)、[Qwen3-TTS](https://github.com/Qwen/Qwen3-TTS)、[Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) の推論を NVIDIA の GPU で速くしたエンジンと、それを差し込んだ音声合成サーバーです。どのサーバーも OpenAI の音声 API と同じ形の `POST /v1/audio/speech` で WAV を返します。Irodori-TTS は参照音声の声で話し、Qwen3-TTS は決まった 9 人の話者から選んで話します。Drama 3 は参照音声とその書き起こしを渡すとその声で話し、渡さないと文ごとにモデルが声を選びます。Built with Fish Audio.
+sokutou は [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)、[Qwen3-TTS](https://github.com/Qwen/Qwen3-TTS)、[Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) の推論を NVIDIA の GPU で速くしたエンジンと、それを差し込んだ音声合成サーバーです。どのサーバーも OpenAI の音声 API にならった `POST /v1/audio/speech` で WAV を返します。Irodori-TTS は参照音声の声で話し、Qwen3-TTS は決まった 9 人の話者から選んで話します。Drama 3 は参照音声とその書き起こしを渡すとその声で話し、渡さないと文ごとにモデルが声を選びます。Built with Fish Audio.
 
 > sokutou runs Irodori-TTS (v4.1-Small, v4.1-Small-MF and v4-Large), Qwen3-TTS 12Hz CustomVoice (0.6B and 1.7B) and Fish Audio Drama 3 faster on NVIDIA GPUs, served over an OpenAI-style `POST /v1/audio/speech`. On one RTX 6000 Ada every model synthesizes a sentence faster than speech.cpp v0.10.1 and the official implementation; Irodori-TTS v4.1-Small at 20 steps takes a median 0.053 s, against 0.221 s for speech.cpp and 0.419 s for the official PyTorch implementation. Drama 3 is Built with Fish Audio. This README is in Japanese.
 
@@ -263,9 +263,17 @@ sokutou のコードは MIT ライセンスです（[LICENSE](LICENSE)）。`eng
 - Irodori-TTS-v4-Large（重み）は Aratako 氏のもので、[Gemma の利用規約（Gemma Terms of Use）](https://ai.google.dev/gemma/terms)に従います。文と caption のエンコーダーが google/t5gemma-2-1b-1b から作られているためです。使うときと配るときは、[Gemma の禁止された使い方の方針（Gemma Prohibited Use Policy）](https://ai.google.dev/gemma/prohibited_use_policy)と、v4.1-Small と同じ倫理上の制限にも従います。
 - コーデックの Semantic-DACVAE-Japanese-32dim は Aratako 氏のもので、MIT ライセンスで提供されています。
 - Qwen3-TTS の重み（Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice と 1.7B-CustomVoice）と、公式の実装の qwen-tts は Alibaba の Qwen チームのもので、Apache-2.0 で提供されています。
-- Fish Audio Drama 3 の重みとコーデック（fishaudio/drama-3）と、公式の実装の fish-speech は Fish Audio（39 AI, INC.）のもので、[Fish Audio Community License 1.0](https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE) で提供されています。研究と非商用の利用は無料です。商用の利用は、年間の売上が 50 万米ドル未満のあいだだけ認められています。他の人が自分の文や声の録音から音声を作れるサービス（API や、音声合成と声の複製を主な目的とするサイトやアプリ）として提供するには、目的や売上にかかわらず、Fish Audio と別の契約が要ります。自分で作る内容（ナレーション、ゲームやアプリのキャラクター、アシスタントの返答など）の音声を作って届けることは、このサービスに当たりません。本人の同意なしにその人の声をまねることと、出力を使ってほかの音声合成のモデルを作ったり学習したりすることは禁じられています。他の人に音声の生成を使わせるときは、この禁止と同じ制限を守らせる約束が要ります。`scripts/build_drama3.sh` で作るイメージには fish-speech が入るので、イメージを配るときは、ライセンスの写しと Notice のファイルを付けます。Built with Fish Audio.
+- Fish Audio Drama 3 の重みとコーデック（fishaudio/drama-3）と、公式の実装の fish-speech は Fish Audio（39 AI, INC.）のもので、[Fish Audio Community License 1.0](https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE) で提供されています。おもな条件は次のとおりです。正確な条件はライセンスの本文で確かめてください。Built with Fish Audio.
+  - 研究と非商用の利用は無料です。
+  - 商用の利用は、年間の売上が 50 万米ドル未満のあいだだけ認められています。年間の売上は自分と関連会社のすべての売上を直近 12 か月で合計した額で、このライセンスの対象と関係のない売上も入ります。50 万米ドルに達したら、その日から 30 日以内に Fish Audio に書面で知らせます。その日にしていた商用の利用は 90 日のあいだ続けられ、そのあとの商用の利用には Fish Audio と別の契約が要ります。
+  - 他の人が自分の文や声の録音から音声を作れるサービス（API や、音声合成と声の複製を主な目的とするサイトやアプリ）として提供するには、目的や売上にかかわらず、Fish Audio と別の契約が要ります。次の 3 つは、このサービスに当たりません。
+    - 自分で作る内容（ナレーション、ゲームやアプリのキャラクター、アシスタントの返答など）の音声を作り、自分の製品やサービスで届けること
+    - 制作の仕事として、自分でモデルを動かして生成を 1 件ずつ指示し、できた音声だけを依頼主に届けること（依頼主が自分で、または自動で生成できるようにはしない）
+    - 研究やデモのための無料で非商用のサービスで、収益を得ず、本番のサービスや API として提供も宣伝もしないもの（Hugging Face の Space、研究のデモ、研究グループの共有サーバーなど）
+  - 本人の同意なしにその人の声をまねることと、出力を使ってほかの音声合成のモデルを作ったり学習したりすることは禁じられています。他の人に音声の生成を使わせるときは、この禁止と同じ制限を守らせる約束が要ります。
+  - `scripts/build_drama3.sh` で作るイメージには fish-speech が入るので、イメージを配るときは、ライセンスの写しと Notice のファイルを付けます。
 - 電子透かしの SilentCipher は Sony のもので、MIT ライセンスで提供されています。
 
-公式の実装は合成した音声に SilentCipher の電子透かしを自動で入れます。sokutou は既定で入れません。入れるときは `SOKUTOU_WATERMARK=1` にします。この設定のサーバーの音声から透かしを読み出せるかは、確かめていません（[docs/results.md](docs/results.md) の「ほかに確かめたこと」）。
+Irodori-TTS の公式の実装は、合成した音声に SilentCipher の電子透かしを自動で入れます。sokutou の Irodori-TTS のサーバーは既定で入れません。入れるときは `SOKUTOU_WATERMARK=1` にします。この設定のサーバーの音声から透かしを読み出せるかは、確かめていません（[docs/results.md](docs/results.md) の「ほかに確かめたこと」）。
 
 速さの比較には [speech.cpp](https://github.com/nyosegawa/speech.cpp)（MIT ライセンス）を使い、この README の構成も参考にしました。

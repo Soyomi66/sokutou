@@ -9,6 +9,7 @@ CUDA Graph にまとめているが、torch の演算のままなので、1 フ�
 カーネル（1 層あたり）
   gemv_seg   : RMSNorm と、同じ入力を使う複数の重み（区切り）の行列とベクトルの積（GEMV）。区切りごとに、出力の書き方を
                選ぶ（0: 書く、1: 足す、2: 2 つの重みの行から silu(a) × b、3: Gated DeltaNet の畳み込み（状態の更新）と silu）
+1 フレームの CUDA Graph は、塔の残りの 8 層と言語モデルの 40 層を 2 本のストリームで並べて流す（_frame_launches）。
   gdn        : Gated DeltaNet の 1 トークン分（q・k の L2 ノルム、β と減衰、状態の更新、出力、gate つきの RMSNorm）
   attn       : 全注意（q・k の頭ごとの RMSNorm、部分 RoPE、K・V の書き込み、GQA、sigmoid の gate）。塔の注意にも使う
   moe_gu     : 経路の選択（256 個から上位 8 個）と、選んだ 8 個のエキスパートの gate・up（FP8）、silu(gate) × up
@@ -31,7 +32,9 @@ import numpy as np
 import torch
 
 _SRC = r'''
-#define WARPS 8
+#ifndef WARPS
+#define WARPS 16  // gemv_seg の 1 ブロックの warp の数（偶数。Python の GEMV_WARPS が渡す）
+#endif
 typedef unsigned short bf16_t;
 
 static __device__ __forceinline__ float bf(unsigned int u){ return __uint_as_float(u << 16); }
@@ -117,7 +120,8 @@ static __device__ __forceinline__ float dot16_fp8(uint4 v, const float* x){
 #if defined(WD_F32)
 #define CHUNK 4
 typedef float wt_t;
-static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const unsigned short* S, int row, int K, int c){
+static __device__ __forceinline__ unsigned short lds(const unsigned short* S, int row, int K, int c){ return 0; }
+static __device__ __forceinline__ float dotc(uint4 v, const float* xp, unsigned short sraw){
   float4 a = ((const float4*)xp)[0];
   return __uint_as_float(v.x) * a.x + __uint_as_float(v.y) * a.y + __uint_as_float(v.z) * a.z + __uint_as_float(v.w) * a.w;
 }
@@ -128,14 +132,18 @@ static __device__ __forceinline__ float dot4i8(unsigned int u, const float* xp){
   return (float)(signed char)(u & 0xffu) * xp[0] + (float)(signed char)((u >> 8) & 0xffu) * xp[1]
        + (float)(signed char)((u >> 16) & 0xffu) * xp[2] + (float)(signed char)(u >> 24) * xp[3];
 }
-static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const unsigned short* S, int row, int K, int c){
-  const float s = h2f(S[(size_t)row * (K >> 5) + (c >> 1)]);
+static __device__ __forceinline__ unsigned short lds(const unsigned short* S, int row, int K, int c){
+  return S[(size_t)row * (K >> 5) + (c >> 1)];
+}
+static __device__ __forceinline__ float dotc(uint4 v, const float* xp, unsigned short sraw){
+  const float s = h2f(sraw);
   return s * (dot4i8(v.x, xp) + dot4i8(v.y, xp + 4) + dot4i8(v.z, xp + 8) + dot4i8(v.w, xp + 12));
 }
 #else
 #define CHUNK 8
 typedef bf16_t wt_t;
-static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const unsigned short* S, int row, int K, int c){
+static __device__ __forceinline__ unsigned short lds(const unsigned short* S, int row, int K, int c){ return 0; }
+static __device__ __forceinline__ float dotc(uint4 v, const float* xp, unsigned short sraw){
   float4 a = ((const float4*)xp)[0], b = ((const float4*)xp)[1];
   return bf(v.x & 0xffffu) * a.x + bf(v.x >> 16) * a.y + bf(v.y & 0xffffu) * a.z + bf(v.y >> 16) * a.w
        + bf(v.z & 0xffffu) * b.x + bf(v.z >> 16) * b.y + bf(v.w & 0xffffu) * b.z + bf(v.w >> 16) * b.w;
@@ -144,9 +152,10 @@ static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const uns
 
 // ---- gemv_seg ----------------------------------------------------------------------------------------------
 // 区切りの表 tab: 1 区切り 10 個の int64 [W, S, W2, S2, out, aux0, aux1, N, mode | (policy << 8), 最初のブロック]
-// 1 warp が 2 行を受け持つ（mode 2 では W の行 n と W2 の行 n）。入力 src [K]（nw があれば RMSNorm して nw を掛ける）。
+// 1 warp が 1 行を受け持つ（mode 2 では、隣り合う 2 つの warp が W の行 n と W2 の行 n）。1 warp が 2 行を持ち、重みを
+// 4 つ先まで読んでおく形より、int8 の 1 フレームが約 15% 速かった（足す順は同じなので、値はビット単位で同じ）。
+// 入力 src [K]（nw があれば RMSNorm して nw を掛ける）。done があり、立っていれば何もしない（EOS のあと）。
 // xn_out があれば、ブロック 0 が正規化した入力を書く（MoE のエキスパートの入力）。
-#define U 4
 #define SEGW 10
 static __device__ __forceinline__ float conv_out(ct_t* st, const ct_t* cw, int r, float a){
   // Gated DeltaNet の畳み込み（幅 4、チャンネルごと）: 状態 [r][3]（古い順）と新しい値 a、そのあと silu。状態を 1 つずらす
@@ -157,37 +166,37 @@ static __device__ __forceinline__ float conv_out(ct_t* st, const ct_t* cw, int r
   s[0] = s[1]; s[1] = s[2]; s[2] = STC(a);
   return silu(y);
 }
-extern "C" __global__ void __launch_bounds__(256) gemv_seg(const float* __restrict__ src, const float* __restrict__ nw, float eps,
-                                                           float* __restrict__ xn_out, const long long* __restrict__ tab,
-                                                           int nseg, int K){
+extern "C" __global__ void __launch_bounds__(WARPS * 32) gemv_seg(const float* __restrict__ src, const float* __restrict__ nw, float eps,
+                                                                  float* __restrict__ xn_out, const long long* __restrict__ tab,
+                                                                  int nseg, int K, const int* __restrict__ done){
   extern __shared__ float xs[];
+  __shared__ float s_inv, s_pair[WARPS];
+  if (done && done[0]) return;  // EOS を引いたあと（結果は使われない）
   int sg = 0;
   while (sg + 1 < nseg && (long long)blockIdx.x >= tab[(sg + 1) * SEGW + 9]) sg++;
   const long long* T = tab + sg * SEGW;
   const int N = (int)T[7], mode = (int)(T[8] & 255), policy = (int)(T[8] >> 8);
   const unsigned long long pol = mkpol(policy);
   const int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int task = ((int)blockIdx.x - (int)T[9]) * WARPS + w;
-  const wt_t* W = (const wt_t*)T[0];
-  const unsigned short* S = (const unsigned short*)T[1];
-  int ra, rb; bool va, vb;
-  const wt_t* Wb; const unsigned short* Sb;
-  if (mode == 2){ ra = rb = task; va = vb = task < N; Wb = (const wt_t*)T[2]; Sb = (const unsigned short*)T[3]; }
-  else { ra = 2 * task; rb = ra + 1; va = ra < N; vb = rb < N; Wb = W; Sb = S; }
-  const uint4* wa = (const uint4*)(W + (size_t)(va ? ra : 0) * K);
-  const uint4* wb = (const uint4*)(Wb + (size_t)(vb ? rb : 0) * K);
+  const int local = ((int)blockIdx.x - (int)T[9]) * WARPS + w;
+  const bool second = mode == 2 && (w & 1);  // mode 2: 偶数の warp が W の行、次の warp が W2 の同じ行
+  const int row = mode == 2 ? local >> 1 : local;
+  const bool valid = row < N;
+  const wt_t* W = (const wt_t*)T[second ? 2 : 0];
+  const unsigned short* S = (const unsigned short*)T[second ? 3 : 1];
+  const uint4* wa = (const uint4*)(W + (size_t)(valid ? row : 0) * K);
   const int nc = K / CHUNK;
-  uint4 v[U][2];
-  #pragma unroll
-  for (int u = 0; u < U; u++){
-    const int c = lane + u * 32;
-    if (c < nc){ if (va) v[u][0] = ldp(wa + c, pol); if (vb) v[u][1] = ldp(wb + c, pol); }
-  }
+  uint4 v;
+  unsigned short sv = 0;
+  if (valid && lane < nc){ v = ldp(wa + lane, pol); sv = lds(S, row, K, lane); }
   float inv = 1.f;
   if (nw){
-    float ss = 0.f;
-    for (int i = lane * 4; i < K; i += 128){ float4 a = *(const float4*)(src + i); ss += a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w; }
-    inv = rsqrtf(warp_sum(ss) / K + eps);
+    if (w == 0){  // 二乗の和は warp 0 だけが求める（どの warp が求めても同じ値）
+      float ss = 0.f;
+      for (int i = lane * 4; i < K; i += 128){ float4 a = *(const float4*)(src + i); ss += a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w; }
+      ss = rsqrtf(warp_sum(ss) / K + eps);
+      if (lane == 0) s_inv = ss;
+    }
     for (int i = threadIdx.x * 4; i < K; i += blockDim.x * 4){
       float4 a = *(const float4*)(src + i), b = *(const float4*)(nw + i);
       *(float4*)(xs + i) = make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
@@ -196,37 +205,26 @@ extern "C" __global__ void __launch_bounds__(256) gemv_seg(const float* __restri
     for (int i = threadIdx.x * 4; i < K; i += blockDim.x * 4) *(float4*)(xs + i) = *(const float4*)(src + i);
   }
   __syncthreads();
+  if (nw) inv = s_inv;
   if (xn_out && blockIdx.x == 0) for (int i = threadIdx.x; i < K; i += blockDim.x) xn_out[i] = xs[i] * inv;
-  float a0 = 0.f, a1 = 0.f;
-  for (int base = lane; base < nc; base += U * 32){
-    #pragma unroll
-    for (int u = 0; u < U; u++){
-      const int c = base + u * 32;
-      if (c < nc){
-        const float* xp = xs + c * CHUNK;
-        if (va) a0 += dotc(v[u][0], xp, S, ra, K, c);
-        if (vb) a1 += dotc(v[u][1], xp, Sb, rb, K, c);
-      }
-    }
-    #pragma unroll
-    for (int u = 0; u < U; u++){
-      const int c = base + (U + u) * 32;
-      if (c < nc){ if (va) v[u][0] = ldp(wa + c, pol); if (vb) v[u][1] = ldp(wb + c, pol); }
-    }
+  // 1 つ先の 16 バイトだけを先に読む（まとめて先に読むより速かった。足す順は lane, lane + 32, ... のまま）
+  float a0 = 0.f;
+  for (int c = lane; c < nc; c += 32){
+    if (valid) a0 += dotc(v, xs + c * CHUNK, sv);
+    if (valid && c + 32 < nc){ v = ldp(wa + c + 32, pol); sv = lds(S, row, K, c + 32); }
   }
   a0 = warp_sum(a0) * inv;
-  a1 = warp_sum(a1) * inv;
-  if (lane != 0) return;
   float* out = (float*)T[4];
-  if (mode == 0){ if (va) out[ra] = a0; if (vb) out[rb] = a1; }
-  else if (mode == 1){ if (va) out[ra] += a0; if (vb) out[rb] += a1; }
-  else if (mode == 2){ if (va) out[ra] = silu(a0) * a1; }
-  else {
-    ct_t* st = (ct_t*)T[5];
-    const ct_t* cw = (const ct_t*)T[6];
-    if (va) out[ra] = conv_out(st, cw, ra, a0);
-    if (vb) out[rb] = conv_out(st, cw, rb, a1);
+  if (mode == 2){
+    if (lane == 0) s_pair[w] = a0;
+    __syncthreads();
+    if (lane == 0 && !(w & 1) && valid) out[row] = silu(s_pair[w]) * s_pair[w + 1];
+    return;
   }
+  if (lane != 0 || !valid) return;
+  if (mode == 0) out[row] = a0;
+  else if (mode == 1) out[row] += a0;
+  else out[row] = conv_out((ct_t*)T[5], (const ct_t*)T[6], row, a0);
 }
 
 // ---- Gated DeltaNet（1 トークン）--------------------------------------------------------------------------
@@ -296,6 +294,8 @@ static __device__ __forceinline__ float rope_at(const float* x, int d, const flo
   const float c = rp[i], s = rp[32 + i];
   return (d & 1) ? x[d] * c + x[d - 1] * s : x[d] * c - x[d + 1] * s;
 }
+#define AU 16
+#define AV 32
 extern "C" __global__ void __launch_bounds__(256) attn(const float* __restrict__ qkv, int interleave_qg, int neox,
                                                        const float* __restrict__ qn, const float* __restrict__ kn, float eps,
                                                        const float* __restrict__ rope, ct_t* __restrict__ Kc,
@@ -332,24 +332,46 @@ extern "C" __global__ void __launch_bounds__(256) attn(const float* __restrict__
   float q8[8];
   #pragma unroll
   for (int i = 0; i < 8; i++) q8[i] = qs[lane * 8 + i];
-  for (int j = w; j < T; j += 8){
-    float s = 0.f;
-    if (j == pos){
-      #pragma unroll
-      for (int i = 0; i < 8; i++) s += q8[i] * ks[lane * 8 + i];
-    } else {
+  // K と V は AU 個の位置を先に読んでから使う（1 つずつ読むと、位置ごとに読み込みを待つ。計算の順は変えない）
+  for (int j0 = w; j0 < T; j0 += 8 * AU){
 #ifdef ACT_F32
-      const float4* kp = (const float4*)(Kh + (size_t)j * 256 + lane * 8);
-      const float4 a = kp[0], b = kp[1];
-      s = q8[0] * a.x + q8[1] * a.y + q8[2] * a.z + q8[3] * a.w + q8[4] * b.x + q8[5] * b.y + q8[6] * b.z + q8[7] * b.w;
+    float4 ka[AU], kb[AU];
 #else
-      const uint4 u = *(const uint4*)(Kh + (size_t)j * 256 + lane * 8);
-      s = q8[0] * bf(u.x & 0xffffu) + q8[1] * bf(u.x >> 16) + q8[2] * bf(u.y & 0xffffu) + q8[3] * bf(u.y >> 16)
-        + q8[4] * bf(u.z & 0xffffu) + q8[5] * bf(u.z >> 16) + q8[6] * bf(u.w & 0xffffu) + q8[7] * bf(u.w >> 16);
+    uint4 ku[AU];
 #endif
+    #pragma unroll
+    for (int a = 0; a < AU; a++){
+      const int j = j0 + 8 * a;
+      if (j < T && j != pos){
+#ifdef ACT_F32
+        const float4* kp = (const float4*)(Kh + (size_t)j * 256 + lane * 8);
+        ka[a] = kp[0]; kb[a] = kp[1];
+#else
+        ku[a] = *(const uint4*)(Kh + (size_t)j * 256 + lane * 8);
+#endif
+      }
     }
-    s = warp_sum(s);
-    if (lane == 0) sc[j] = s;
+    #pragma unroll
+    for (int a = 0; a < AU; a++){
+      const int j = j0 + 8 * a;
+      if (j >= T) break;
+      float s = 0.f;
+      if (j == pos){
+        #pragma unroll
+        for (int i = 0; i < 8; i++) s += q8[i] * ks[lane * 8 + i];
+      } else {
+#ifdef ACT_F32
+        const float4 a4 = ka[a], b4 = kb[a];
+        s = q8[0] * a4.x + q8[1] * a4.y + q8[2] * a4.z + q8[3] * a4.w + q8[4] * b4.x + q8[5] * b4.y + q8[6] * b4.z + q8[7] * b4.w;
+#else
+        const uint4 u = ku[a];
+        s = q8[0] * bf(u.x & 0xffffu) + q8[1] * bf(u.x >> 16) + q8[2] * bf(u.y & 0xffffu) + q8[3] * bf(u.y >> 16)
+          + q8[4] * bf(u.z & 0xffffu) + q8[5] * bf(u.z >> 16) + q8[6] * bf(u.w & 0xffffu) + q8[7] * bf(u.w >> 16);
+#endif
+      }
+      s = warp_sum(s);
+      if (lane == 0) sc[j] = s;
+    }
   }
   __syncthreads();
   float m = -__int_as_float(0x7f800000);
@@ -360,7 +382,15 @@ extern "C" __global__ void __launch_bounds__(256) attn(const float* __restrict__
   sum = block_sum(sum, red);
   const ct_t* Vh = Vc + (size_t)kvh * cap * 256;
   float acc = 0.f;
-  for (int j = 0; j < pos; j++) acc += sc[j] * LDC(Vh[(size_t)j * 256 + d]);
+  int jv = 0;
+  for (; jv + AV <= pos; jv += AV){
+    ct_t r[AV];
+    #pragma unroll
+    for (int a = 0; a < AV; a++) r[a] = Vh[(size_t)(jv + a) * 256 + d];
+    #pragma unroll
+    for (int a = 0; a < AV; a++) acc += sc[jv + a] * LDC(r[a]);
+  }
+  for (; jv < pos; jv++) acc += sc[jv] * LDC(Vh[(size_t)jv * 256 + d]);
   acc += sc[pos] * vs[d];
   out[h * 256 + d] = acc / sum * sigm(gt);
 }
@@ -373,12 +403,13 @@ extern "C" __global__ void __launch_bounds__(256) attn(const float* __restrict__
 extern "C" __global__ void __launch_bounds__(256) moe_gu(const float* __restrict__ router, const float* __restrict__ xn,
                                                          const unsigned char* __restrict__ w13, const float* __restrict__ s13,
                                                          float* __restrict__ act, int* __restrict__ ids_out,
-                                                         float* __restrict__ wts_out){
+                                                         float* __restrict__ wts_out, const int* __restrict__ done){
   __shared__ float xs[2048];
   __shared__ int s_id[8];
   __shared__ float s_wt[8];
   const int t = threadIdx.x, w = t >> 5, lane = t & 31;
   const int slot = blockIdx.x >> 6, n = ((blockIdx.x & 63) << 3) + w;
+  if (done && done[0]) return;
   if (w == 0){
     float l[8];
     #pragma unroll
@@ -394,7 +425,7 @@ extern "C" __global__ void __launch_bounds__(256) moe_gu(const float* __restrict
         const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
         if (ob > best || (ob == best && oi < bi)){ best = ob; bi = oi; }
       }
-      if (lane == 0){ s_id[k] = bi; s_wt[k] = best; }
+      if (lane == 0){ s_id[k] = bi > 255 ? k : bi; s_wt[k] = best; }  // logits が NaN なら選べない。範囲の中の番号にする
       if ((bi >> 3) == lane){
         #pragma unroll
         for (int j = 0; j < 8; j++) if (j == (bi & 7)) l[j] = -__int_as_float(0x7f800000);
@@ -416,12 +447,12 @@ extern "C" __global__ void __launch_bounds__(256) moe_gu(const float* __restrict
   const unsigned char* base = w13 + (size_t)e * 1024 * 2048;
   const uint4* ga = (const uint4*)(base + (size_t)n * 2048);
   const uint4* ua = (const uint4*)(base + (size_t)(512 + n) * 2048);
-  uint4 vg[4], vu[4];
-  #pragma unroll
-  for (int u = 0; u < 4; u++){ vg[u] = ldp(ga + lane + 32 * u, pol); vu[u] = ldp(ua + lane + 32 * u, pol); }
   const float* sc = s13 + (size_t)e * 128;
   const int rbg = n >> 7, rbu = (512 + n) >> 7;
   float ag = 0.f, au = 0.f;
+  uint4 vg[4], vu[4];
+  #pragma unroll
+  for (int u = 0; u < 4; u++){ vg[u] = ldp(ga + lane + 32 * u, pol); vu[u] = ldp(ua + lane + 32 * u, pol); }
   #pragma unroll
   for (int u = 0; u < 4; u++){
     const int c = lane + 32 * u, cb = c >> 3;
@@ -439,8 +470,10 @@ extern "C" __global__ void __launch_bounds__(256) moe_down(const float* __restri
                                                            const float* __restrict__ wts, const unsigned char* __restrict__ w2,
                                                            const float* __restrict__ s2, const float* __restrict__ sact,
                                                            const float* __restrict__ sgate, const wt_t* __restrict__ wsd,
-                                                           const unsigned short* __restrict__ ssd, float* __restrict__ x){
+                                                           const unsigned short* __restrict__ ssd, float* __restrict__ x,
+                                                           const int* __restrict__ done){
   __shared__ float as[8 * 512 + 512];
+  if (done && done[0]) return;
   __shared__ int s_id[8];
   __shared__ float s_wt[8];
   const int t = threadIdx.x, w = t >> 5, lane = t & 31, row = blockIdx.x * 8 + w;
@@ -462,7 +495,7 @@ extern "C" __global__ void __launch_bounds__(256) moe_down(const float* __restri
   for (int k = 0; k < 8; k++) acc += s_wt[k] * s2[((size_t)s_id[k] * 16 + rb) * 4 + cb] * dot16_fp8(ve[k], as + k * 512 + lane * 16);
   float sh = 0.f;
   #pragma unroll
-  for (int q = 0; q < NSC; q++){ const int c = lane + 32 * q; sh += dotc(vs[q], as + 4096 + c * CHUNK, ssd, row, 512, c); }
+  for (int q = 0; q < NSC; q++){ const int c = lane + 32 * q; sh += dotc(vs[q], as + 4096 + c * CHUNK, lds(ssd, row, 512, c)); }
   acc = warp_sum(acc);
   sh = warp_sum(sh);
   if (lane == 0) x[row] += acc + sigm(sgate[0]) * sh;
@@ -482,7 +515,7 @@ extern "C" __global__ void embed_backbone(const ct_t* __restrict__ temb, const c
     if (sem) v = (v + LDC(cb[(size_t)(4096 + c1) * dim + i])) / 1.4142135623730951f;
     x[i] = v;
   }
-  if (blockIdx.x == 0 && threadIdx.x < 11) frame_in[threadIdx.x] = frame_out[threadIdx.x];
+  if (frame_in && blockIdx.x == 0 && threadIdx.x < 11) frame_in[threadIdx.x] = frame_out[threadIdx.x];
 }
 
 // out = RMSNorm(x) · nw（1 ブロック 1024 スレッド、2048 次元）。pos があれば 1 つ進める（フレームの最後）
@@ -648,7 +681,8 @@ static __device__ int draw(const float* l, int V, int top_k, float top_p, uint2 
       const int r = base + lane;
       float p = 0.f, v = 0.f;
       int id = 0x7fffffff;
-      if (r < n){ const int q = sm.order[r]; v = sm.cv[q]; id = sm.ci[q]; p = expf(v - m) / z; }
+      // 値に NaN があると順位が決まらず、order に書かれない場所が残る。範囲の中だけを読む（bad が立ち、結果は使われない）
+      if (r < n){ const int q = sm.order[r] & (MAXC - 1); v = sm.cv[q]; id = sm.ci[q]; p = expf(v - m) / z; }
       float inc = p;
       #pragma unroll
       for (int o = 1; o < 32; o <<= 1){ const float y = __shfl_up_sync(0xffffffffu, inc, o); if (lane >= o) inc += y; }
@@ -667,7 +701,7 @@ static __device__ int draw(const float* l, int V, int top_k, float top_p, uint2 
       const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
       if (ob > best || (ob == best && oi < bi)){ best = ob; bi = oi; }
     }
-    if (lane == 0) sm.result = bi == 0x7fffffff ? 0 : bi;
+    if (lane == 0) sm.result = (bi < 0 || bi >= V) ? 0 : bi;
   }
   __syncthreads();
   return sm.result;
@@ -685,7 +719,7 @@ extern "C" __global__ void __launch_bounds__(1024) sample_main(const float* __re
                                                                long long* __restrict__ history, long long* __restrict__ frame_out,
                                                                volatile long long* __restrict__ host_main,
                                                                const long long* __restrict__ step, int* __restrict__ bad,
-                                                               int eos, int sem_begin, int sem_end){
+                                                               int eos, int sem_begin, int sem_end, int* __restrict__ done){
   __shared__ DrawSmem sm;
   const int t = threadIdx.x;
   float raw[PER], l[PER];
@@ -715,6 +749,7 @@ extern "C" __global__ void __launch_bounds__(1024) sample_main(const float* __re
     long long c0 = mn - sem_begin;
     frame_out[1] = c0 < 0 ? 0 : (c0 > 4095 ? 4095 : c0);
     host_main[step[0]] = mn;
+    if (done && mn == eos) done[0] = 1;  // このあとの重いカーネル（gemv_seg、moe_gu、moe_down）はすぐ返る
   }
 }
 
@@ -725,7 +760,8 @@ extern "C" __global__ void __launch_bounds__(1024) sample_code(const float* __re
                                                                unsigned long long* __restrict__ counter,
                                                                long long* __restrict__ frame_out, int slot, int last,
                                                                long long* __restrict__ frames, long long* __restrict__ step,
-                                                               int* __restrict__ bad){
+                                                               int* __restrict__ bad, long long* __restrict__ frame_in,
+                                                               long long* __restrict__ tpos){
   __shared__ DrawSmem sm;
   const int t = threadIdx.x;
   const int V = 4096;
@@ -750,12 +786,15 @@ extern "C" __global__ void __launch_bounds__(1024) sample_code(const float* __re
       for (int i = 0; i < 11; i++) frames[s * 11 + i] = frame_out[i];
       step[0] = s + 1;
       counter[0] = cnt + 1ull;
+      if (frame_in) for (int i = 0; i < 11; i++) frame_in[i] = frame_out[i];
+      if (tpos) tpos[0] += 1;
     }
   }
 }
 '''
 
 SEM_BEGIN, SEM_END, EOS = 248099, 252194, 248046
+GEMV_WARPS = 16  # gemv_seg の 1 ブロックの warp の数（8 より 1 フレームが約 1% 速い。偶数にする）
 WIDTH = 11  # フレームの行 [main, c0..c9]
 
 
@@ -814,8 +853,8 @@ class Segs:
         for lin, out, mode, lin2, aux0, aux1 in segs:
             assert lin.K == K and (lin2 is None or (lin2.K == K and lin2.N == lin.N))
             m = self.MODES[mode]
-            tasks = lin.N if m == 2 else -(-lin.N // 2)
-            nb = -(-tasks // 8)
+            tasks = 2 * lin.N if m == 2 else lin.N  # 1 warp が 1 行（pair は 2 つの warp で 1 行）
+            nb = -(-tasks // GEMV_WARPS)
             rows.append([int(_ptr(lin.w)), int(_ptr(lin.s)), int(_ptr(None if lin2 is None else lin2.w)),
                          int(_ptr(None if lin2 is None else lin2.s)), int(_ptr(out)), int(_ptr(aux0)), int(_ptr(aux1)),
                          lin.N, m | (lin.pol << 8), blocks])
@@ -851,19 +890,20 @@ class Kern:
 
         self.cp = cp
         self.wd = wd
-        opts = ("-std=c++14",) + {"bf16": (), "i8g32": ("-DWD_I8G32",), "f32": ("-DWD_F32", "-DACT_F32")}[wd]
+        opts = ("-std=c++14", f"-DWARPS={GEMV_WARPS}") + {"bf16": (), "i8g32": ("-DWD_I8G32",), "f32": ("-DWD_F32", "-DACT_F32")}[wd]
         t0 = time.perf_counter()
         mod = cp.RawModule(code=_SRC, options=opts)
         self.k = {n: mod.get_function(n) for n in self.NAMES}
         self.compile_sec = time.perf_counter() - t0
+        self.done = None  # EOS の印（int32 の GPU のテンソル）。あれば、立っているあいだ重いカーネルはすぐ返る
 
     def __call__(self, name: str, grid: int, block: int, args: tuple, smem: int = 0) -> None:
         conv = tuple(_ptr(a) if (a is None or isinstance(a, torch.Tensor)) else a for a in args)
         self.k[name]((int(grid),), (int(block),), conv, shared_mem=int(smem))
 
     def gemv(self, src, nw, eps, xn_out, segs: Segs) -> None:
-        self("gemv_seg", segs.blocks, 256, (src, nw, np.float32(eps), xn_out, segs.tab, np.int32(segs.n), np.int32(segs.K)),
-             smem=segs.K * 4)
+        self("gemv_seg", segs.blocks, 32 * GEMV_WARPS, (src, nw, np.float32(eps), xn_out, segs.tab, np.int32(segs.n), np.int32(segs.K),
+                                                        self.done), smem=segs.K * 4)
 
 
 class Bufs:
@@ -929,8 +969,8 @@ def run_backbone_layer(k: Kern, L: dict, B: Bufs, pos, pos_add: int, rope: torch
         k("gdn", 32, 512, (B.conv, B.zg, B.b, B.a, L["A_log"], L["dt_bias"], L["gw"], np.float32(L["geps"]), L["state"], B.y))
     k.gemv(B.y, None, 0.0, None, L["o"])
     k.gemv(B.x, L["n2"], L["eps"], B.xn, L["moe_in"])
-    k("moe_gu", 512, 256, (B.router, B.xn, L["w13"], L["s13"], B.act, B.ids, B.wts))
-    k("moe_down", 256, 256, (B.act, B.ids, B.wts, L["w2"], L["s2"], B.sact, B.sg, L["sd"].w, L["sd"].s, B.x))
+    k("moe_gu", 512, 256, (B.router, B.xn, L["w13"], L["s13"], B.act, B.ids, B.wts, k.done))
+    k("moe_down", 256, 256, (B.act, B.ids, B.wts, L["w2"], L["s2"], B.sact, B.sg, L["sd"].w, L["sd"].s, B.x, k.done))
 
 
 def tower_layer_spec(layer, wd: str, B: Bufs, device) -> dict:
@@ -992,6 +1032,34 @@ def drop_unused_codec_masks(codec) -> int:
     return freed
 
 
+def cache_codec_masks(codec, entries: int = 256) -> int:
+    """コーデックの WindowLimitedTransformer が呼ぶたびに CPU で作る窓つきの因果マスクを、長さごとに GPU に残して使い回す。
+    包んだモジュールの数を返す。
+
+    マスクは長さだけで決まる（因果のときは x_lens を読まない）。公式の make_window_limited_mask を 1 回呼んだ結果を残す
+    だけなので、復号の値は変わらない。作るのに 1 回 3〜11 ms かかっていた（34〜176 フレームの復号 20〜50 ms のうち）。"""
+    from fish_speech.models.dac.modded_dac import WindowLimitedTransformer
+
+    wrapped = 0
+    for m in codec.modules():
+        if type(m) is not WindowLimitedTransformer or not m.causal or m.window_size is None:
+            continue
+        make, cache = m.make_window_limited_mask, OrderedDict()
+
+        def cached(max_length, x_lens=None, make=make, cache=cache, m=m):
+            dev = m.norm.weight.device
+            mask = cache.get((max_length, dev))
+            if mask is None:
+                mask = cache[(max_length, dev)] = make(max_length, x_lens).to(dev)
+                while len(cache) > entries:
+                    cache.popitem(last=False)
+            return mask
+
+        m.make_window_limited_mask = cached
+        wrapped += 1
+    return wrapped
+
+
 class Drama3Engine:
     """公式の FishOmniModel（bf16、エキスパートは FP8、CUDA の 1 枚）の 1 フレームを、自作のカーネルで動かす。
 
@@ -1003,7 +1071,8 @@ class Drama3Engine:
     EOS を見る（フレーム n の結果を待つ前にフレーム n+1 を流す。EOS のあとの 1 フレームは捨てる）。
     """
 
-    def __init__(self, model, wd: str = "bf16", graphs: bool = True, prefill_graphs: int = 0, prefix_cache: bool = False):
+    def __init__(self, model, wd: str = "bf16", graphs: bool = True, prefill_graphs: int = 0, prefix_cache: bool = False,
+                 eos_skip: bool = True, parallel_tower: bool = True):
         from fish_speech.models.text2semantic.fish_omni.generate import (DRAMA3_GRAPH_CAPACITY, ensure_drama3_caches)
 
         self.model = model
@@ -1036,12 +1105,18 @@ class Drama3Engine:
             self.rope_bb, self.rope_tw = rope_tables(self.cap, dev, float(cfg.text.rope_theta))
         i64 = dict(dtype=torch.int64, device=dev)
         self.pos, self.step = torch.zeros(1, **i64), torch.zeros(1, **i64)
+        self.tpos = torch.zeros(1, **i64)  # 塔が読む位置（pos と同じ値。_frame_launches を見る）
+        self.side = torch.cuda.Stream(dev) if parallel_tower else None
         self.frame_in, self.frame_out = torch.zeros(WIDTH, **i64), torch.zeros(WIDTH, **i64)
         self.history = torch.full((16,), -1, **i64)
         self.frames = torch.zeros((self.cap + 2, WIDTH), **i64)
         self.seed, self.counter = torch.zeros(1, **i64), torch.zeros(1, **i64)
         self.params = torch.tensor([1.0, 0.9, 30.0], dtype=torch.float32, device=dev)
         self.bad = torch.zeros(1, dtype=torch.int32, device=dev)
+        # EOS を引いたら sample_main が立てる印。EOS のフレームの残りと、先に流してある次のフレームを軽くする
+        # （eos_skip が False のときと、hook で値を書き換えるとき（教師強制）は立てない）
+        self.done = torch.zeros(1, dtype=torch.int32, device=dev)
+        self.k.done, self.eos_skip = self.done, eos_skip
         # CPU が読む main token（ページ固定のメモリー。GPU のカーネルが直接書く）
         self.host_main = torch.full((self.cap + 2,), -1, dtype=torch.int64).pin_memory()
         self.graph = None
@@ -1061,34 +1136,62 @@ class Drama3Engine:
         self.setup_sec = time.perf_counter() - t0
 
     # --- 1 フレーム -----------------------------------------------------------------------------------------------
-    def _frame_launches(self, hook=None) -> None:
+    def _frame_launches(self, hook=None, side=None) -> None:
         """1 フレームのカーネルを並べる。hook（確かめ用。グラフなしのときだけ）は、引いた直後に hook("main", 0) と
-        hook("code", i) で呼ばれ、ロジット（B.lmain、B.lcode）を写したり、frame_out を書き換えたり（教師強制）できる。"""
+        hook("code", i) で呼ばれ、ロジット（B.lmain、B.lcode）を写したり、frame_out を書き換えたり（教師強制）できる。
+
+        side（torch.cuda.Stream）があれば、塔の残り（第 2〜9 のコードを作る 8 層）を side に、言語モデルの 40 層を今の
+        ストリームに流して、並べて動かす。言語モデルの入力は main token と第 1 のコードだけで決まる（embed_backbone）ので、
+        この 2 つは互いの結果を読まない。塔は位置を tpos から読み（最後の sample_code が進める）、言語モデルは pos から読む
+        （rmsnorm_adv が進める）。次のフレームの塔の入力 frame_in は、side があれば最後の sample_code が写し、なければ
+        embed_backbone が写す（hook が書き換えた値を写すため）。計算は side のあるなしで同じ。"""
         k, B, cap = self.k, self.B, self.cap
+        cp = k.cp
         k.gemv(B.hid, None, 0.0, None, self.lm)
         k("sample_main", 1, 1024, (B.lmain, np.int32(4097), self.params, self.seed, self.counter, self.history,
                                    self.frame_out, self.host_main, self.step, self.bad, np.int32(EOS), np.int32(SEM_BEGIN),
-                                   np.int32(SEM_END)))
+                                   np.int32(SEM_END), self.done if (self.eos_skip and hook is None) else None))
         if hook:
             hook("main", 0)
         src, fprev = B.hid, None
         for i, T in enumerate(self.tshared):
-            run_tower_layer(k, T, B, src, fprev, self.frame_out, 1, self.cb if i == 0 else None, self.frame_in, self.pos,
+            run_tower_layer(k, T, B, src, fprev, self.frame_out, 1, self.cb if i == 0 else None, self.frame_in, self.tpos,
                             self.rope_tw, cap)
             src, fprev = B.tr, T["fnw"]
-        for i, T in enumerate(self.tres):
-            run_tower_layer(k, T, B, src, fprev, self.frame_out, 1 + i, None, None, self.pos, self.rope_tw, cap)
-            src, fprev = B.tr, T["fnw"]
+
+        def residual(i: int, fprev):
+            T = self.tres[i]
+            run_tower_layer(k, T, B, B.tr, fprev, self.frame_out, 1 + i, None, None, self.tpos, self.rope_tw, cap)
             k.gemv(B.tr, T["fnw"], T["eps"], None, self.heads[i])
+            last = i == len(self.tres) - 1
             k("sample_code", 1, 1024, (B.lcode, self.params, self.seed, self.counter, self.frame_out, np.int32(2 + i),
-                                       np.int32(int(i == len(self.tres) - 1)), self.frames, self.step, self.bad))
+                                       np.int32(int(last)), self.frames, self.step, self.bad,
+                                       self.frame_in if (last and side is not None) else None, self.tpos if last else None))
             if hook:
                 hook("code", i)
-        k("embed_backbone", 8, 256, (self.temb, self.cb, self.frame_out, self.frame_in, B.x, np.int32(2048),
-                                     np.int32(SEM_BEGIN), np.int32(SEM_END)))
-        for L in self.layers:
-            run_backbone_layer(k, L, B, self.pos, 1, self.rope_bb, cap)
-        k("rmsnorm_adv", 1, 1024, (B.x, self.fnorm, np.float32(self.feps), B.hid, self.pos))
+            return T["fnw"]
+
+        def backbone() -> None:
+            k("embed_backbone", 8, 256, (self.temb, self.cb, self.frame_out, None if side is not None else self.frame_in, B.x,
+                                         np.int32(2048), np.int32(SEM_BEGIN), np.int32(SEM_END)))
+            for L in self.layers:
+                run_backbone_layer(k, L, B, self.pos, 1, self.rope_bb, cap)
+            k("rmsnorm_adv", 1, 1024, (B.x, self.fnorm, np.float32(self.feps), B.hid, self.pos))
+
+        fprev = residual(0, fprev)
+        if side is None:
+            for i in range(1, len(self.tres)):
+                fprev = residual(i, fprev)
+            backbone()
+            return
+        assert hook is None
+        main = torch.cuda.current_stream()
+        side.wait_stream(main)
+        with cp.cuda.ExternalStream(side.cuda_stream):
+            for i in range(1, len(self.tres)):
+                fprev = residual(i, fprev)
+        backbone()
+        main.wait_stream(side)
 
     def frame(self, hook=None) -> None:
         """1 フレームを今の torch のストリームに流す（グラフがあれば再生する。hook はグラフなしのときだけ）。"""
@@ -1111,7 +1214,7 @@ class Drama3Engine:
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             with self.k.cp.cuda.ExternalStream(torch.cuda.current_stream().cuda_stream):
-                self._frame_launches()
+                self._frame_launches(side=self.side)
         torch.cuda.synchronize()
         self.graph = g
         return time.perf_counter() - t0
@@ -1240,6 +1343,7 @@ class Drama3Engine:
         rows = len(prompt)
         self.B.hid.copy_(hidden.float())
         self.pos.fill_(rows - 1)
+        self.tpos.fill_(rows - 1)
         self.step.zero_()
         self.frame_in.copy_(prompt[-1].to(self.device))
         window = prompt[-16:, 0].to(self.device)
@@ -1247,6 +1351,7 @@ class Drama3Engine:
         self.history[16 - len(window):].copy_(window)
         self.params.copy_(torch.tensor([float(temperature), float(top_p), float(top_k)], dtype=torch.float32))
         self.bad.zero_()
+        self.done.zero_()
         # 自前の乱数の鍵は torch の CPU の乱数から引く（set_seed で同じ列になり、続けて呼べば毎回変わる）
         self.seed.fill_(int(torch.randint(0, 2**62, (1,)).item()))
         self.counter.zero_()

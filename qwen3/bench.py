@@ -56,6 +56,8 @@ def main() -> None:
                     help="--engine kernels のサンプリング（fused: 1 カーネル、torch: 公式と同じ乱数の torch の演算）")
     ap.add_argument("--l2-keep-mb", type=float, default=None,
                     help="--engine kernels で L2 に残す code predictor の重みの上限（MiB）。既定は L2 の大きさ - 16 MiB")
+    ap.add_argument("--cp-pair", choices=["auto", "on", "off"], default="auto",
+                    help="--engine kernels で code predictor の位置 0 と 1 をまとめて通すか（auto は on）")
     ap.add_argument("--max-cache", type=int, default=1024, help="--engine fast の言語モデルの KV キャッシュの長さ")
     ap.add_argument("--compile", action="store_true", help="--engine fast で 1 フレーム分を torch.compile する")
     args = ap.parse_args()
@@ -144,7 +146,7 @@ def bench_fast(tts: Qwen3TTSModel, args) -> None:
         from kernels import Qwen3Kernels
 
         eng = Qwen3Kernels(tts, sampling, max_cache=args.max_cache, wd=args.wd, sampler=args.sampler,
-                           l2_keep_mb=args.l2_keep_mb)
+                           l2_keep_mb=args.l2_keep_mb, cp_pair={"auto": None, "on": True, "off": False}[args.cp_pair])
     else:
         eng = Qwen3Fast(tts, sampling, max_cache=args.max_cache, compile=args.compile)
     capture_sec = eng.capture()
@@ -161,7 +163,7 @@ def bench_fast(tts: Qwen3TTSModel, args) -> None:
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
     info = {"engine": args.engine, "wd": args.wd if args.engine == "kernels" else None,
-            **({"sampler": eng.sampler, "l2_keep_mb": eng.l2_keep_mb, "l2_kept_bytes": eng.l2_kept_bytes}
+            **({"sampler": eng.sampler, "l2_keep_mb": eng.l2_keep_mb, "l2_kept_bytes": eng.l2_kept_bytes, "cp_pair": eng.cp_pair}
                if args.engine == "kernels" else {}), "model": MODELS[args.model], "dtype": args.dtype, "attn": args.attn, "greedy": args.greedy,
             "max_cache": args.max_cache, "compile": args.compile, "capture_sec": capture_sec, "warm": warm, "sampling": vars(sampling),
             "torch": torch.__version__, "device": torch.cuda.get_device_name(0)}

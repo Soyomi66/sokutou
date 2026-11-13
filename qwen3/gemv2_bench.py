@@ -42,7 +42,7 @@ static __device__ __forceinline__ void rows_v1(const wt_t* __restrict__ W, const
     #pragma unroll
     for (int r = 0; r < RPW; r++) v[r] = ldnc((const uint4*)(W + (size_t)(row0 + r) * K) + c);
     #pragma unroll
-    for (int r = 0; r < RPW; r++) acc[r] += dotc(v[r], xs + c * CHUNK, S, row0 + r, K, c);
+    for (int r = 0; r < RPW; r++) acc[r] += dotc(wconv(v[r]), xs + c * CHUNK, LDS(S, row0 + r, K, c));
   }
   #pragma unroll
   for (int r = 0; r < RPW; r++) acc[r] = warp_sum(acc[r]);

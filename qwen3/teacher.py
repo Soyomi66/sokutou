@@ -110,6 +110,8 @@ def main() -> None:
     ap.add_argument("--variant", choices=["hf-dynamic", "hf-static", "kernels"], default="hf-dynamic")
     ap.add_argument("--wd", default="bf16", help="--variant kernels の重みの型（bf16、i8g32、f32）")
     ap.add_argument("--dtype", default="bfloat16")
+    ap.add_argument("--cp-pair", choices=["auto", "on", "off"], default="auto",
+                    help="--variant kernels で code predictor の位置 0 と 1 をまとめて通すか（auto は on）")
     ap.add_argument("--limit", type=int, default=6)
     ap.add_argument("--save-ref", action="store_true", help="基準として runs/check/qwen3/teacher-ref-<model>.pt に保存する")
     args = ap.parse_args()
@@ -120,7 +122,7 @@ def main() -> None:
     if args.variant == "kernels":
         from kernels import Qwen3Kernels
 
-        eng = Qwen3Kernels(tts, wd=args.wd, graphs=False)
+        eng = Qwen3Kernels(tts, wd=args.wd, graphs=False, cp_pair={"auto": None, "on": True, "off": False}[args.cp_pair])
         eng.capture()  # StaticCache を用意する（記録したグラフは使わない）
     res = []
     for i, s in enumerate(sentences):

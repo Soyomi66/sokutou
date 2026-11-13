@@ -6,7 +6,7 @@ BucketSampler の 1 ステップは、行列積と attention のほかに、正�
 
   1. res_adaln : 残差の足し込み（h_res += gate × o）と、次の AdaLN（正規化 → scale・shift → 行列積の型）
   2. qkv       : q と k の正規化・重み・RoPE、v の並べ替え、条件の K・V の連結（attention の並びで書く）
-  3. gate      : attention の出力の並べ替えと、sigmoid(gate) の掛け算
+  3. gate      : attention の出力に sigmoid(gate) を掛ける
   4. swiglu    : silu(a) × b
   （1 は attention の前と MLP の前の 2 回）
 
@@ -179,17 +179,14 @@ extern "C" __global__ void qkv(const wd_t* o4, const float* qk_w, const float* f
   }
 }
 
-// 1 ブロック = 行 (b, p)。out[b, p, h × hd + e] = y[b, h, p, e] × sigmoid(o4[b, p, 3D + h × hd + e])
-extern "C" __global__ void gate(const wd_t* y, const wd_t* o4, ot_t* out, int L, int H, int HD, float os){
-  const int D = H * HD;
-  const int b = blockIdx.x / L, p = blockIdx.x % L;
+// 1 ブロック = 行 (b, p)。out[b, p, h × hd + e] = y[b, p, h, e] × sigmoid(o4[b, p, 3D + h × hd + e])
+// y は (B, L, heads, hd) の並び（PyTorch の attention が出力を持つ並び。FusedCore が転置して渡す）。
+extern "C" __global__ void gate(const wd_t* y, const wd_t* o4, ot_t* out, int D, float os){
+  const wd_t* yr = y + (size_t)blockIdx.x * D;
   const wd_t* g = o4 + (size_t)blockIdx.x * 4 * D + 3 * D;
   ot_t* o = out + (size_t)blockIdx.x * D;
-  for (int j = threadIdx.x; j < D; j += NT){
-    int h = j / HD, e = j % HD;
-    float yv = LD(y[((size_t)(b * H + h) * L + p) * HD + e]);
-    o[j] = STO(yv * (1.0f / (1.0f + expf(-LD(g[j])))), os);
-  }
+  for (int j = threadIdx.x; j < D; j += NT)
+    o[j] = STO(LD(yr[j]) * (1.0f / (1.0f + expf(-LD(g[j])))), os);
 }
 
 // 1 ブロック = 1 行。out = silu(a) × b。o13 の行は [a（hidden 個）, b（hidden 個）]。
@@ -296,7 +293,9 @@ class FusedCore(DitCore):
                 self.launch("qkv", bsz * keys, self.qkv_threads, o4, p["qk_w"], freqs_real, ctx_k[li], ctx_v[li], q, k, v,
                             i32(seq_len), i32(n_ctx), i32(heads), i32(hd), f32(self.inv_head_dim), f32(p["qk_eps_f"]))
                 y = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
-                self.launch("gate", rows, 256, y.contiguous(), o4, yg, i32(seq_len), i32(heads), i32(hd), f32(S(li, "yg")))
+                # attention の出力は (B, L, heads, hd) の並びを転置したもの。転置を戻すと連続なので、写さずに読める
+                # （連続でなければ写す。1 層に 1 回のコピーがなくなる）。
+                self.launch("gate", rows, 256, y.transpose(1, 2).contiguous(), o4, yg, i32(dim), f32(S(li, "yg")))
                 if tap is not None:
                     tap(li, "yg", yg)
                 o = self.mm(yg, li, "w_o", "yg")

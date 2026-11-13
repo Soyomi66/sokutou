@@ -32,6 +32,7 @@ CFG はなし（蒸留に含まれる）。DiT の 1 回の計算は RF 版と�
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 
 import torch
@@ -483,6 +484,16 @@ def patch_runtime(sampler) -> None:
     import irodori_tts.inference_runtime as IR
 
     setattr(IR, runtime_sampler_name(sampler.model), sampler.sample)
+    patch_tail()
+
+
+def patch_tail() -> None:
+    """文末を探す関数を、同じ番号を返す速いものに差し替える（engine/tail.py）。
+    環境変数 SOKUTOU_OFFICIAL_TAIL=1 なら、公式の関数のままにする。"""
+    if os.environ.get("SOKUTOU_OFFICIAL_TAIL", "0") != "1":
+        from engine.tail import install_fast_tail
+
+        install_fast_tail()
 
 
 def install(rt, *, precision: str = "fp32", **kw) -> FastSampler:

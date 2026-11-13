@@ -215,7 +215,9 @@ async def speech(body: SpeechIn) -> Response:
         srv.counts["captured_during_request"] += 1
         log.error("CUDA Graph を要求の途中で記録した: %s（%d 文字）", captured, len(text))
     duration = len(audio) / sr
-    if st.get("frame_limited") or duration > max_seconds(len(text)):
+    # cache_limited: K・V のキャッシュ（max_cache）の上限で止めた。長い文では cap より先にここで止まり、
+    # 音声の長さが max_seconds より短いまま切れることがある（200 字で 900 フレーム = 72 秒 < 82 秒）
+    if st.get("frame_limited") or st.get("cache_limited") or duration > max_seconds(len(text)):
         srv.counts["frame_limited"] += 1
         raise HTTPException(500, f"implausible duration {duration:.1f}s for {len(text)} chars (frames {st['frames']})")
     log.info("voice=%s chars=%d tokens=%d frames=%d audio=%.2fs synth=%.3fs", speaker, len(text), st["prompt_tokens"], st["frames"],

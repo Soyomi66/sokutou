@@ -478,7 +478,7 @@ def check_sampler(args, model, ref) -> dict:
                 eng.step.zero_()
                 for _ in range(n):
                     k("sample_code", 1, 1024, (B.lcode, eng.params, eng.seed, eng.counter, eng.frame_out, np.int32(10),
-                                               np.int32(1), eng.frames, eng.step, eng.bad))
+                                               np.int32(1), eng.frames, eng.step, eng.bad, None, None))
                 res.append(eng.frames[:n, 10].clone())
                 done += n
         torch.cuda.synchronize()
@@ -495,7 +495,7 @@ def check_sampler(args, model, ref) -> dict:
                 eng.history.copy_(h0)
                 k("sample_main", 1, 1024, (B.lmain, np.int32(4097), eng.params, eng.seed, eng.counter, eng.history,
                                            eng.frame_out, eng.host_main, eng.step, eng.bad, np.int32(K.EOS),
-                                           np.int32(K.SEM_BEGIN), np.int32(K.SEM_END)))
+                                           np.int32(K.SEM_BEGIN), np.int32(K.SEM_END), None))
                 o[j:j + 1].copy_(eng.frame_out[0:1])
                 eng.counter.add_(1)
         torch.cuda.synchronize()

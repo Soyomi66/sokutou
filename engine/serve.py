@@ -16,6 +16,8 @@ API、入力の確かめ、24kHz への変換、無音の切り落とし、応�
   v4-Large は Small と同じ設定（20 ステップ、CFG）で、GPU のメモリーを約 31GB 使う。
 - SOKUTOU_WATERMARK: 1 なら電子透かしを残す（既定 0）
 - IRODORI_PRECISION は fp32 のままにする（エンジンが fp32 の重みから BF16 の複製を作る）
+- SOKUTOU_OFFICIAL_TAIL: 1 なら、文末を探す関数を公式のままにする（既定 0。engine/tail.py。出力は同じで、遅くなる）
+- SOKUTOU_FUSED_DECODE: 0 なら、復号を自作のカーネルにまとめない（既定 1。engine/decode.py。出力は同じで、遅くなる）
 
 起動のときの試し合成（server.py の lifespan）で、公式の関数に戻るか、グラフを途中で記録するか、起動のときに通していない
 長さで復号したら、起動を止める。動いているあいだに起きたら、エラーのログを出して数を増やす（音声はそのまま返す）。

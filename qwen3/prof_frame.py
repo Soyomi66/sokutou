@@ -32,6 +32,8 @@ def main() -> None:
     ap.add_argument("--wd", default="bf16")
     ap.add_argument("--sampler", choices=["fused", "torch"], default="fused")
     ap.add_argument("--l2-keep-mb", type=float, default=None)
+    ap.add_argument("--cp-pair", choices=["auto", "on", "off"], default="auto",
+                    help="--engine kernels で code predictor の位置 0 と 1 をまとめて通すか（auto は on）")
     ap.add_argument("--frames", type=int, default=50)
     ap.add_argument("--top", type=int, default=25)
     args = ap.parse_args()
@@ -42,7 +44,8 @@ def main() -> None:
     if args.engine == "kernels":
         from kernels import Qwen3Kernels
 
-        eng = Qwen3Kernels(tts, Sampling.from_kwargs(kw), wd=args.wd, sampler=args.sampler, l2_keep_mb=args.l2_keep_mb)
+        eng = Qwen3Kernels(tts, Sampling.from_kwargs(kw), wd=args.wd, sampler=args.sampler, l2_keep_mb=args.l2_keep_mb,
+                           cp_pair={"auto": None, "on": True, "off": False}[args.cp_pair])
     else:
         eng = Qwen3Fast(tts, Sampling.from_kwargs(kw), compile=args.compile)
     print("capture", round(eng.capture(), 2), flush=True)

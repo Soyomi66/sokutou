@@ -18,9 +18,9 @@
 
 sokutou は [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)、[Qwen3-TTS](https://github.com/Qwen/Qwen3-TTS)、[Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) の推論を NVIDIA の GPU で速くしたエンジンと、それを差し込んだ音声合成サーバーです。どのサーバーも OpenAI の音声 API と同じ形の `POST /v1/audio/speech` で WAV を返します。Irodori-TTS は参照音声の声で話し、Qwen3-TTS は決まった 9 人の話者から選んで話します。Drama 3 は参照音声とその書き起こしを渡すとその声で話し、渡さないと文ごとにモデルが声を選びます。Built with Fish Audio.
 
-> sokutou runs Irodori-TTS (v4.1-Small, v4.1-Small-MF and v4-Large), Qwen3-TTS 12Hz CustomVoice (0.6B and 1.7B) and Fish Audio Drama 3 faster on NVIDIA GPUs, served over an OpenAI-style `POST /v1/audio/speech`. On one RTX 6000 Ada every model synthesizes a sentence faster than speech.cpp v0.10.1 and the official implementation; Irodori-TTS v4.1-Small at 20 steps takes a median 0.059 s, against 0.221 s for speech.cpp and 0.418 s for the official PyTorch implementation. Drama 3 is Built with Fish Audio. This README is in Japanese.
+> sokutou runs Irodori-TTS (v4.1-Small, v4.1-Small-MF and v4-Large), Qwen3-TTS 12Hz CustomVoice (0.6B and 1.7B) and Fish Audio Drama 3 faster on NVIDIA GPUs, served over an OpenAI-style `POST /v1/audio/speech`. On one RTX 6000 Ada every model synthesizes a sentence faster than speech.cpp v0.10.1 and the official implementation; Irodori-TTS v4.1-Small at 20 steps takes a median 0.053 s, against 0.221 s for speech.cpp and 0.419 s for the official PyTorch implementation. Drama 3 is Built with Fish Audio. This README is in Japanese.
 
-**同じ GPU で、どのモデルも speech.cpp と公式の実装より速く合成します。** RTX 6000 Ada で 1 文の合成にかかる時間の中央値は、Irodori-TTS v4.1-Small（20 ステップ）で 0.059 秒です。speech.cpp v0.10.1 は 0.221 秒、公式の実装は 0.418 秒でした。モデルごとの値は「[精度と速度](#精度と速度)」にあります。
+**同じ GPU で、どのモデルも speech.cpp と公式の実装より速く合成します。** RTX 6000 Ada で 1 文の合成にかかる時間の中央値は、Irodori-TTS v4.1-Small（20 ステップ）で 0.053 秒です。speech.cpp v0.10.1 は 0.221 秒、公式の実装は 0.419 秒でした。モデルごとの値は「[精度と速度](#精度と速度)」にあります。
 
 **Irodori-TTS では、重みと API は公式の実装のままです。** 読み込むのは Hugging Face にある公式の重みです。API、入力の確認、24kHz への変換、無音の切り落としは、公式の実装で合成するサーバー（`server/server.py`）と同じコードを使います。Qwen3-TTS と Drama 3 のサーバーも同じエンドポイントとヘッダーで答えます（受け付ける項目は、[Qwen3-TTS](docs/models/qwen3-tts.md#api-と環境変数) と [Drama 3](docs/models/drama3.md#api-と環境変数) のページにあります）。
 
@@ -30,7 +30,7 @@ sokutou は [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)、[Qwen3-TTS](
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/speed-dark.svg">
-  <img src="assets/speed-light.svg" width="520" alt="1 文の合成にかかる時間の中央値。v4.1-Small（20 ステップ）は sokutou 0.059 秒、speech.cpp 0.221 秒、公式の実装 0.418 秒。v4.1-Small-MF（4 ステップ）は 0.028 秒、0.075 秒、0.134 秒。v4-Large（20 ステップ）は 0.198 秒、0.453 秒、1.099 秒">
+  <img src="assets/speed-light.svg" width="520" alt="1 文の合成にかかる時間の中央値。v4.1-Small（20 ステップ）は sokutou 0.053 秒、speech.cpp 0.221 秒、公式の実装 0.419 秒。v4.1-Small-MF（4 ステップ）は 0.022 秒、0.075 秒、0.134 秒。v4-Large（20 ステップ）は 0.186 秒、0.453 秒、1.089 秒">
 </picture>
 
 ## モデル
@@ -49,7 +49,7 @@ sokutou は [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)、[Qwen3-TTS](
 
 移植した計算は公式の実装と同じ入力から動かし、途中の値と出力を比べて確かめています。エンジンを fp32 で動かすと、Irodori-TTS の 3 つのモデルでは、ステップごとの出力から最後の音声まで、どの段階の差も公式の実装を GPU と CPU で動かしたときの差より小さくなりました。Qwen3-TTS では、エンジンを float32 で動かすと、同じ文・同じシードで作った音声のコードが、公式の実装とすべてのフレームで同じになりました（0.6B と 1.7B、12 件ずつ）。Drama 3 では、エンジンの各層を float32 で動かすと、公式の実装の層を float32 にしたものとの SNR が、言語モデルの 40 層すべてで 113 dB 以上になりました。サーバーで使う BF16 と int8 では波形が変わるので、読み間違いの率（CER）と声の近さを公式の実装と比べています。
 
-2026-11-11 に、1 枚の RTX 6000 Ada（48GB、電力の上限 300 W）で測りました。日本語の 48 文（`data/sentences.json`）をシード 1 と 2 で 1 件ずつ合成し、1 文の合成にかかった時間の中央値と、合成した音声を faster-whisper（medium）で書き起こしたときの CER を出しました。Irodori-TTS と Qwen3-TTS の速さは、これを 2 回繰り返して測りました。sokutou と公式の実装はプロセスの中で測り、speech.cpp v0.10.1（Vulkan）は `speech serve` に HTTP で送って測りました。speech.cpp の値だけが HTTP の往復を含みます。測る範囲は、Irodori-TTS が合成から 24kHz への変換と前後の無音の切り落としまで、Qwen3-TTS と Drama 3 が文を受け取ってから波形ができるまでで、サーバーが返す `X-Synthesis-Seconds` と同じ範囲です。speech.cpp の Irodori-TTS の音声は 48kHz のまま返り、無音の切り落としはありません。sokutou をサーバーとして動かし、HTTP の往復を含めて測っても、表の値より長くなったのは 8 ミリ秒までです。速さはどれも電子透かしを入れずに測りました。
+1 枚の RTX 6000 Ada（48GB、電力の上限 300 W）で測りました。日本語の 48 文（`data/sentences.json`）をシード 1 と 2 で 1 件ずつ合成し、1 文の合成にかかった時間の中央値と、合成した音声を faster-whisper（medium）で書き起こしたときの CER を出しました。Irodori-TTS と Qwen3-TTS の速さは、これを 2 回繰り返して測りました。sokutou と公式の実装はプロセスの中で測り、speech.cpp v0.10.1（Vulkan）は `speech serve` に HTTP で送って測りました。speech.cpp の値だけが HTTP の往復を含みます。測る範囲は、Irodori-TTS が合成から 24kHz への変換と前後の無音の切り落としまで、Qwen3-TTS と Drama 3 が文を受け取ってから波形ができるまでで、サーバーが返す `X-Synthesis-Seconds` と同じ範囲です。speech.cpp の Irodori-TTS の音声は 48kHz のまま返り、無音の切り落としはありません。sokutou をサーバーとして動かし、HTTP の往復を含めて測っても、表の値より長くなったのは 6 ミリ秒までです。速さはどれも電子透かしを入れずに測りました。sokutou と Irodori-TTS の公式の実装の速さは 2026-11-12〜13 に測り直した値で、そのほかの値は 2026-11-11 のものです。公式の実装の中央値は、測り直しても 11-11 に測った値との差が 1% 以内でした。
 
 重みの型は、sokutou が表のとおりです。公式の実装は、Irodori-TTS が fp32、Qwen3-TTS が bf16、Drama 3 が bf16 とエキスパートの FP8 です。speech.cpp は、Irodori-TTS が F16、Qwen3-TTS が Q8_0、Drama 3 が Q4_K です。speech.cpp の v4-Large だけは既定の Q8_0 ではなく、それより速かった F16 の重みで測りました。
 
@@ -57,19 +57,19 @@ Irodori-TTS は 1 つの参照音声（7.9 秒）の声で読み上げ、話す�
 
 | モデル | 1 文の時間の中央値（sokutou / speech.cpp / 公式の実装） | CER（sokutou / speech.cpp / 公式の実装） |
 | --- | --- | --- |
-| Irodori-TTS v4.1-Small、BF16、20 ステップ | 0.059 秒 / 0.221 秒 / 0.418 秒 | 2.96% / — / 3.11% |
-| Irodori-TTS v4.1-Small-MF、BF16、4 ステップ | 0.028 秒 / 0.075 秒 / 0.134 秒 | 4.03% / — / 3.57% |
-| Irodori-TTS v4-Large、BF16、20 ステップ | 0.198 秒 / 0.453 秒 / 1.099 秒 | 3.21% / — / 3.26% |
-| Qwen3-TTS 0.6B、int8 | 0.176 秒 / 0.341 秒 / 7.066 秒 | 7.03% / 5.66% / 5.71% |
-| Qwen3-TTS 1.7B、int8 | 0.207 秒 / 0.360 秒 / 5.476 秒 | 8.56% / 19.88% / 5.96% |
-| Drama 3、int8、参照なし | 0.620 秒 / 1.026 秒 / 1.643 秒 | 2.34% / 3.52% / 2.04% |
-| Drama 3、int8、参照あり | 0.641 秒 / 1.184 秒 / 1.846 秒 | 2.24% / 5.25% / 2.40% |
+| Irodori-TTS v4.1-Small、BF16、20 ステップ | 0.053 秒 / 0.221 秒 / 0.419 秒 | 2.96% / — / 3.11% |
+| Irodori-TTS v4.1-Small-MF、BF16、4 ステップ | 0.022 秒 / 0.075 秒 / 0.134 秒 | 4.03% / — / 3.57% |
+| Irodori-TTS v4-Large、BF16、20 ステップ | 0.186 秒 / 0.453 秒 / 1.089 秒 | 3.21% / — / 3.26% |
+| Qwen3-TTS 0.6B、int8 | 0.171 秒 / 0.341 秒 / 7.066 秒 | 7.03% / 5.66% / 5.71% |
+| Qwen3-TTS 1.7B、int8 | 0.204 秒 / 0.360 秒 / 5.476 秒 | 8.56% / 19.88% / 5.96% |
+| Drama 3、int8、参照なし | 0.496 秒 / 1.026 秒 / 1.643 秒 | 2.34% / 3.52% / 2.04% |
+| Drama 3、int8、参照あり | 0.500 秒 / 1.184 秒 / 1.846 秒 | 2.24% / 5.25% / 2.40% |
 
 「—」は測っていない値です。CER は、v4.1-Small の公式の実装だけが電子透かしを入れた音声の値で、そのほかは透かしのない音声の値です。
 
-40 ステップ（v4.1-Small のモデルの既定）では、1 文の時間の中央値は v4.1-Small で 0.098 秒（speech.cpp は 0.398 秒、公式の実装は 0.758 秒）、v4-Large で 0.376 秒（同じく 0.846 秒、2.073 秒）でした。CER は v4.1-Small で 2.91%（公式の実装は 3.11%）、v4-Large で 3.36%（同じく 3.26%）です。
+40 ステップ（v4.1-Small のモデルの既定）では、1 文の時間の中央値は v4.1-Small で 0.090 秒（speech.cpp は 0.398 秒、公式の実装は 0.765 秒）、v4-Large で 0.361 秒（同じく 0.846 秒、2.071 秒）でした。CER は v4.1-Small で 2.91%（公式の実装は 3.11%）、v4-Large で 3.36%（同じく 3.26%）です。
 
-Qwen3-TTS と Drama 3 はサンプリングで話すので、同じ文の音声も実装とシードで変わります。話す長さも実装ごとに違い、Qwen3-TTS では音声の長さの中央値が 3.5〜4.8 秒に分かれたので、1 文の時間だけでは比べきれません。合成の時間の合計を音声の長さの合計で割った「音声 1 秒あたり」の時間は、sokutou / speech.cpp / 公式の実装の順に、Qwen3-TTS 0.6B が 0.039 秒 / 0.081 秒 / 1.526 秒、1.7B が 0.058 秒 / 0.096 秒 / 1.549 秒、Drama 3 の参照なしが 0.191 秒 / 0.306 秒 / 0.471 秒、参照ありが 0.194 秒 / 0.306 秒 / 0.502 秒です。話し終えずに続く音声が数本あると、96 本の CER は数 % 動きます。Qwen3-TTS の int8 の CER は、96 本では公式の実装より高くなりました。CER がいちばん高い 2 本を除くと、0.6B は 5.66%（公式の実装は 4.34%）、1.7B は 3.81%（同じく 5.09%）です。0.6B をシード 1〜6 の 288 本で比べると、int8 が 5.23%、公式の実装が 6.95% でした。
+Qwen3-TTS と Drama 3 はサンプリングで話すので、同じ文の音声も実装とシードで変わります。話す長さも実装ごとに違い、Qwen3-TTS では音声の長さの中央値が 3.5〜4.8 秒に分かれたので、1 文の時間だけでは比べきれません。合成の時間の合計を音声の長さの合計で割った「音声 1 秒あたり」の時間は、sokutou / speech.cpp / 公式の実装の順に、Qwen3-TTS 0.6B が 0.038 秒 / 0.081 秒 / 1.526 秒、1.7B が 0.057 秒 / 0.096 秒 / 1.549 秒、Drama 3 の参照なしが 0.158 秒 / 0.306 秒 / 0.471 秒、参照ありが 0.156 秒 / 0.306 秒 / 0.502 秒です。話し終えずに続く音声が数本あると、96 本の CER は数 % 動きます。Qwen3-TTS の int8 の CER は、96 本では公式の実装より高くなりました。CER がいちばん高い 2 本を除くと、0.6B は 5.66%（公式の実装は 4.34%）、1.7B は 3.81%（同じく 5.09%）です。0.6B をシード 1〜6 の 288 本で比べると、int8 が 5.23%、公式の実装が 6.95% でした。
 
 声の近さは話者照合のモデル（microsoft/wavlm-base-plus-sv）の埋め込みのコサイン類似度で比べました。比べる相手は、Irodori-TTS では参照の話者の本物の声、Qwen3-TTS では公式の実装が作った音声の重心、Drama 3 の参照ありでは参照音声です。声の近さを測った行では、sokutou と公式の実装の差はどれも 0.003 以内でした。
 
@@ -78,7 +78,7 @@ Qwen3-TTS と Drama 3 はサンプリングで話すので、同じ文の音声�
 ## 必要なもの
 
 - Linux（x86-64）、Docker、NVIDIA Container Toolkit
-- NVIDIA の GPU と、約 13GB の GPU のメモリー（v4-Large は約 31GB）
+- NVIDIA の GPU と、約 14GB の GPU のメモリー（v4-Large は約 31GB）
 - イメージに約 9.4GB、モデルに約 3.4GB のディスク（v4-Large は約 12.8GB）
 - Qwen3-TTS には compute capability 8.0 以上の GPU（Ampere 以降）と、約 8.5GB の GPU のメモリー（1.7B は約 11.7GB）
 - Qwen3-TTS のイメージに約 9.1GB、モデルに約 2.3GB のディスク（1.7B は約 4.3GB）
@@ -124,7 +124,7 @@ Irodori-TTS のサーバーの動かし方です。Qwen3-TTS と Drama 3 の動�
 
    v4-Large を使うときは、`-e IRODORI_CHECKPOINT=Aratako/Irodori-TTS-v4-Large` を足します。ステップ数は 20 のままで使えます。重みは Gemma の利用規約に従います（「ライセンス」の節）。
 
-   初めて起動するときは、モデル、コーデック、電子透かしのモデル（合わせて約 3.4GB）を Docker のボリューム `sokutou-hf` に取得します。準備ができると、`/health` が 200 を返します。作者のマシンでは、取得を含めて 73 秒、2 回目からは約 30 秒かかりました。v4-Large は初めての起動で合わせて約 12.8GB を取得し、取得を含めて 180 秒で準備ができました。2 回目からは 51 秒でした。
+   初めて起動するときは、モデル、コーデック、電子透かしのモデル（合わせて約 3.4GB）を Docker のボリューム `sokutou-hf` に取得します。準備ができると、`/health` が 200 を返します。作者のマシンでは、取得を含めて 73 秒、2 回目からは約 30 秒かかりました。v4-Large は初めての起動で合わせて約 12.8GB を取得し、取得を含めて 180 秒で準備ができました。2 回目からは 50 秒でした。
 
    ```sh
    curl -s http://127.0.0.1:8088/health
@@ -172,6 +172,8 @@ Irodori-TTS のサーバーの API です。Qwen3-TTS と Drama 3 のサーバ�
 | `IRODORI_NUM_STEPS` | 必須。ステップ数で、エンジンと要求の両方に使います。空だと起動しません。確かめたのは 20 と 40 です（MF 版は 4。v4-Large のサーバーは 20 だけ） |
 | `EMPTY_CACHE_EVERY` | この回数の合成ごとに GPU のキャッシュを解放します（既定 50）。sokutou では 0 をすすめます。0 でも GPU のメモリーは起動の準備のあとで増えず、50 では解放する回の合成が 13〜47 ミリ秒遅くなります |
 | `SOKUTOU_WATERMARK` | 1 にすると電子透かしを残します（既定 0） |
+| `SOKUTOU_FUSED_DECODE` | 0 にすると、復号器の畳み込みのあいだの処理を 1 つにまとめたカーネルを使わず、まとめる前の処理で復号します（既定 1。出力は同じです） |
+| `SOKUTOU_OFFICIAL_TAIL` | 1 にすると、文末を探す処理を公式の関数に戻します（既定 0。出力は同じです） |
 | `HF_HUB_OFFLINE` | イメージの既定は 1（取得しない）。初めて起動するときは 0 にします |
 | `VOICE_DIR` | 声のディレクトリ（既定 `/voices`） |
 | `DEFAULT_VOICE` | `voice` を省いたときの声 |
@@ -192,7 +194,8 @@ v4.1-Small の公式の実装では、1 文の時間が、DiT を 40 回通す�
 - DiT の各層（v4.1-Small は 12 層、v4-Large は 24 層）の重み・行列積・attention を BF16 にし、残差、正規化、CFG の合成は fp32 のまま計算します。
 - 小さな処理を自作の CUDA カーネル（CuPy で NVRTC でコンパイルする）にまとめ、v4.1-Small では 1 ステップのカーネルを約 460 個から約 200 個に減らしました。
 - v4-Large の文のエンコーダー（T5Gemma 2）には、CUDA Graph に記録できない処理（真偽値のマスクを使った代入）が 1 つあります。sokutou はこれを同じ値を返す処理に差し替えてから記録します。
-- 復号（コーデック）は決まった 47 通りの長さに 0 で伸ばして動かします。初めての長さで遅くなることと、GPU のメモリーが増え続けることを防ぎます。
+- 復号（コーデック）は決まった 47 通りの長さに 0 で伸ばして動かします。初めての長さで遅くなることと、GPU のメモリーが増え続けることを防ぎます。復号器の畳み込みのあいだの処理（bias と残差の足し算、Snake、後ろを 0 にする処理）は、1 つの自作のカーネルにまとめます。
+- 文末を探す処理（公式の `find_flattening_point`）は、公式の関数と同じフレームの番号を返す関数に差し替えます。公式の関数は GPU の上で 1 フレームごとに結果を待つので、長い音声ほど時間がかかっていました。
 - 電子透かし（SilentCipher）は既定で外します。
 
 要求の設定がエンジンと違うと、エンジンは公式の関数で合成します。サーバーは起動のときの試し合成でそうなったら起動を止め、動いているあいだは `irregular_requests` を数えます。
@@ -206,8 +209,8 @@ v4.1-Small の公式の実装では、1 文の時間が、DiT を 40 回通す�
 - 1 つのサーバーで使える声は 1 つです。`voices/` に声が 2 つ以上あると起動しません。
 - 使えるモデルは v4.1-Small、MF 版、v4-Large の 3 つです。v2・v3 のモデルは使えません。
 - ステップ数のほかの設定（CFG など）は、「精度と速度」の節のものに決まっています。caption（VoiceDesign）と、参照音声を使わない合成はできません。
-- GPU のメモリーを約 13GB（nvidia-smi で 12,500 MiB 前後）使い、起動には約 30 秒かかります（うちエンジンの準備は約 8 秒）。MF 版は約 11.7GB で、起動には 28 秒（うちエンジンの準備は 6.2 秒）かかりました。
-- v4-Large は約 31GB（nvidia-smi で 29,790 MiB）で、起動には 51 秒（うちエンジンの準備は 12.0 秒）かかりました。
+- GPU のメモリーを約 13.7GB（nvidia-smi で 13,048 MiB）使い、起動には約 30 秒かかります（うちエンジンの準備は約 8 秒）。MF 版は約 12.3GB で、起動には 27 秒（うちエンジンの準備は 5.8 秒）かかりました。
+- v4-Large は約 31GB（nvidia-smi で 29,716 MiB）で、起動には 50 秒（うちエンジンの準備は 11.4 秒）かかりました。
 - 出力は公式の実装と同じ値にはなりません（BF16 のため）。読み間違いと声の近さは「精度と速度」の節の 1 つの声で確かめました。
 - v4.1-Small では、長さの違う参照音声（3 秒、15.7 秒、31.4 秒）で起動と速さだけを確かめました。声の質は確かめていません。v4-Large は 7.9 秒の参照音声だけで確かめました。v4-Large のモデルカードは、短い参照音声 1 つでは声の近さがかなり下がるとし、できれば 30 秒以上の参照音声を使うようすすめています。
 

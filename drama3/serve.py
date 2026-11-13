@@ -56,7 +56,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench import REPO_ID, REVISION, SAMPLE_RATE, checkpoint_path  # noqa: E402
-from kernels import Drama3Engine, drop_unused_codec_masks  # noqa: E402
+from kernels import Drama3Engine, cache_codec_masks, drop_unused_codec_masks  # noqa: E402
 
 log = logging.getLogger("drama3-server")
 
@@ -102,6 +102,7 @@ class Server:
         self.model, _ = fi.init_model(str(path), "cuda:0", torch.bfloat16)
         self.codec = fi.load_codec_model(str(path / "codec.pth"), "cuda:0", torch.bfloat16)
         freed = drop_unused_codec_masks(self.codec)
+        cache_codec_masks(self.codec)  # 復号のたびに CPU で作っていた窓つきのマスクを使い回す（値は同じ）
         self.hop = int(self.codec.frame_length)  # 1 フレームのサンプル数（2048。hop_length 512 × 量子化の前の間引き 4）
         assert self.hop == 2048, self.hop
         assert int(self.codec.sample_rate) == SAMPLE_RATE

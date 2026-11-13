@@ -12,7 +12,10 @@ Qwen3Fast は 1 フレームを CUDA Graph にまとめたが、HF のモジュ�
   i8g32 : int8 と、行の中の 32 個ごとの尺度（fp16）。speech.cpp の Q8_0 と同じ分け方。読む量が約半分になる
 言語モデルの最初の入力（プロンプト）は、HF のモジュールのまま StaticCache に入れ、そのキャッシュをこのカーネルが読み書きする
 （並びは [1, kv の頭, 長さ, 128] で同じ）。code predictor の最初の 2 トークン（言語モデルの隠れ状態と第 0 のコード）は、
-1 トークンずつ 2 回通す（公式は 2 トークンをまとめて通す。計算は同じで、丸めの順だけが変わる）。
+1 トークンずつの計算を 2 つ並べて通す（公式は 2 トークンをまとめて通す。計算は同じで、丸めの順だけが変わる）。
+cp_pair が True（既定）なら、この 2 トークンの GEMV を 1 つのカーネルにまとめ、重みを 1 回だけ読む（rms_gemv2、gemv2。
+値は 1 トークンずつ通したときと同じ）。1 フレームは bf16 で 2〜3%、i8g32 で 0.3% 短くなる（i8g32 は積の計算が重く、
+まとめた分がほぼ相殺される）。
 GEMV は、最初の重みを入力の準備より先に読み始め、RMSNorm の 2 乗和を warp ごとに求める（__syncthreads は 1 回）。
 重みを読むときに L2 の扱いを指定する。1 フレームに 16 回読む code predictor の重み（int8 で約 80 MiB）は L2 に残し、
 1 回だけ読む重み（言語モデルなど）は先に追い出す。指定しないと、code predictor の重みが L2 にほとんど残らない。
@@ -83,25 +86,35 @@ static __device__ __forceinline__ float block_sum(float v, float* red){
 #if defined(WD_F32)
 #define CHUNK 4
 typedef float wt_t;
-static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const unsigned short* S, int row, int K, int c){
+#define LDS(S, row, K, c) 0.f
+typedef uint4 wf_t;
+static __device__ __forceinline__ wf_t wconv(uint4 v){ return v; }
+static __device__ __forceinline__ float dotc(uint4 v, const float* xp, float s){
   float4 a = ((const float4*)xp)[0];
   return __uint_as_float(v.x) * a.x + __uint_as_float(v.y) * a.y + __uint_as_float(v.z) * a.z + __uint_as_float(v.w) * a.w;
 }
 #elif defined(WD_I8G32)
 #define CHUNK 16
 typedef signed char wt_t;
-static __device__ __forceinline__ float dot4i8(unsigned int u, const float* xp){
-  return (float)(signed char)(u & 0xffu) * xp[0] + (float)(signed char)((u >> 8) & 0xffu) * xp[1]
-       + (float)(signed char)((u >> 16) & 0xffu) * xp[2] + (float)(signed char)(u >> 24) * xp[3];
+struct wf_t { float4 a, b, c, d; };
+static __device__ __forceinline__ float4 cvt4i8(unsigned int u){
+  return make_float4((float)(signed char)(u & 0xffu), (float)(signed char)((u >> 8) & 0xffu),
+                     (float)(signed char)((u >> 16) & 0xffu), (float)(signed char)(u >> 24));
 }
-static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const unsigned short* S, int row, int K, int c){
-  float s = h2f(S[(size_t)row * (K >> 5) + (c >> 1)]);
-  return s * (dot4i8(v.x, xp) + dot4i8(v.y, xp + 4) + dot4i8(v.z, xp + 8) + dot4i8(v.w, xp + 12));
+static __device__ __forceinline__ wf_t wconv(uint4 v){ wf_t w; w.a = cvt4i8(v.x); w.b = cvt4i8(v.y); w.c = cvt4i8(v.z); w.d = cvt4i8(v.w); return w; }
+static __device__ __forceinline__ float dot4f(float4 w, const float* xp){ return w.x * xp[0] + w.y * xp[1] + w.z * xp[2] + w.w * xp[3]; }
+// 尺度（行の中の 32 個ごと）
+#define LDS(S, row, K, c) h2f((S)[(size_t)(row) * ((K) >> 5) + ((c) >> 1)])
+static __device__ __forceinline__ float dotc(wf_t w, const float* xp, float s){
+  return s * (dot4f(w.a, xp) + dot4f(w.b, xp + 4) + dot4f(w.c, xp + 8) + dot4f(w.d, xp + 12));
 }
 #else
 #define CHUNK 8
 typedef bf16_t wt_t;
-static __device__ __forceinline__ float dotc(uint4 v, const float* xp, const unsigned short* S, int row, int K, int c){
+#define LDS(S, row, K, c) 0.f
+typedef uint4 wf_t;
+static __device__ __forceinline__ wf_t wconv(uint4 v){ return v; }
+static __device__ __forceinline__ float dotc(uint4 v, const float* xp, float s){
   float4 a = ((const float4*)xp)[0], b = ((const float4*)xp)[1];
   return bf(v.x & 0xffffu) * a.x + bf(v.x >> 16) * a.y + bf(v.y & 0xffffu) * a.z + bf(v.y >> 16) * a.w
        + bf(v.z & 0xffffu) * b.x + bf(v.z >> 16) * b.y + bf(v.w & 0xffffu) * b.z + bf(v.w >> 16) * b.w;
@@ -132,13 +145,15 @@ static __device__ __forceinline__ unsigned long long mkpol(int policy){
 // 組は RPW 行で、1 行の K / CHUNK 個のかたまりを、組の split 個の warp で 32 × split ずつ分けて読む。
 // 最初の U 回分の重みを、入力の準備（共有メモリーへの書き込みと RMSNorm の 2 乗和）より先に読み始める。
 // nw があれば、共有メモリーに x · nw を置き、最後に 1 / rms を掛ける（2 乗和は warp ごとに x 全体から求める）。
-// 結果は組の sub 0 の lane 0 が受け取る（row_out が -1 ならそのスレッドは書かない）。
-template <int RPW>
+// NC は入力のベクトルの数（1 か 2）。2 のときは、同じ重みを 1 回読んで 2 つのベクトルとの積を求める（j 番目の入力は
+// src + j * sstride。1 つずつ求めたときと同じ順で足すので、値は同じ）。共有メモリーは NC × K 個の float。
+// 結果（acc_out[j * RPW + r]）は組の sub 0 の lane 0 が受け取る（row_out が -1 ならそのスレッドは書かない）。
+template <int RPW, int NC>
 static __device__ __forceinline__ void gemv_core(const wt_t* __restrict__ W, const unsigned short* __restrict__ S,
-                                                 const float* __restrict__ src, const float* __restrict__ nw, float eps,
-                                                 int N, int K, int split, int policy, float* acc_out, int* row_out){
+                                                 const float* __restrict__ src, int sstride, const float* __restrict__ nw,
+                                                 float eps, int N, int K, int split, int policy, float* acc_out, int* row_out){
   extern __shared__ float xs[];
-  __shared__ float red[WARPS][RPW];
+  __shared__ float red[WARPS][NC * RPW];
   const unsigned long long pol = mkpol(policy);
   const int w = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int gpb = WARPS / split, grp = w / split, sub = w - grp * split;
@@ -155,29 +170,45 @@ static __device__ __forceinline__ void gemv_core(const wt_t* __restrict__ W, con
     #pragma unroll
     for (int r = 0; r < RPW; r++) if (act && c < nc) v[u][r] = ldp(wr[r] + c, pol);
   }
-  float inv = 1.f;
-  if (nw){
-    float ss = 0.f;
-    for (int i = lane * 4; i < K; i += 128){ float4 a = *(const float4*)(src + i); ss += a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w; }
-    inv = rsqrtf(warp_sum(ss) / K + eps);
-    for (int i = threadIdx.x * 4; i < K; i += blockDim.x * 4){
-      float4 a = *(const float4*)(src + i), b = *(const float4*)(nw + i);
-      *(float4*)(xs + i) = make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+  float inv[NC];
+  #pragma unroll
+  for (int j = 0; j < NC; j++){
+    const float* sj = src + (size_t)j * sstride;
+    float* xj = xs + (size_t)j * K;
+    inv[j] = 1.f;
+    if (nw){
+      float ss = 0.f;
+      for (int i = lane * 4; i < K; i += 128){ float4 a = *(const float4*)(sj + i); ss += a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w; }
+      inv[j] = rsqrtf(warp_sum(ss) / K + eps);
+      for (int i = threadIdx.x * 4; i < K; i += blockDim.x * 4){
+        float4 a = *(const float4*)(sj + i), b = *(const float4*)(nw + i);
+        *(float4*)(xj + i) = make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+      }
+    } else {
+      for (int i = threadIdx.x * 4; i < K; i += blockDim.x * 4) *(float4*)(xj + i) = *(const float4*)(sj + i);
     }
-  } else {
-    for (int i = threadIdx.x * 4; i < K; i += blockDim.x * 4) *(float4*)(xs + i) = *(const float4*)(src + i);
   }
   __syncthreads();
-  float acc[RPW];
+  float acc[NC][RPW];
   #pragma unroll
-  for (int r = 0; r < RPW; r++) acc[r] = 0.f;
+  for (int j = 0; j < NC; j++){
+    #pragma unroll
+    for (int r = 0; r < RPW; r++) acc[j][r] = 0.f;
+  }
   if (act){
     for (int base = c0; base < nc; base += U * stride){
       #pragma unroll
       for (int u = 0; u < U; u++){
         int c = base + u * stride;
         #pragma unroll
-        for (int r = 0; r < RPW; r++) if (c < nc) acc[r] += dotc(v[u][r], xs + c * CHUNK, S, row0 + r, K, c);
+        for (int r = 0; r < RPW; r++){
+          if (c < nc){
+            const float sc = LDS(S, row0 + r, K, c);
+            const wf_t wf = wconv(v[u][r]);
+            #pragma unroll
+            for (int j = 0; j < NC; j++) acc[j][r] += dotc(wf, xs + j * K + c * CHUNK, sc);
+          }
+        }
       }
       #pragma unroll
       for (int u = 0; u < U; u++){
@@ -188,49 +219,94 @@ static __device__ __forceinline__ void gemv_core(const wt_t* __restrict__ W, con
     }
   }
   #pragma unroll
-  for (int r = 0; r < RPW; r++) acc[r] = warp_sum(acc[r]) * inv;
+  for (int j = 0; j < NC; j++){
+    #pragma unroll
+    for (int r = 0; r < RPW; r++) acc[j][r] = warp_sum(acc[j][r]) * inv[j];
+  }
   if (split > 1){
     if (lane == 0){
       #pragma unroll
-      for (int r = 0; r < RPW; r++) red[w][r] = acc[r];
+      for (int j = 0; j < NC; j++){
+        #pragma unroll
+        for (int r = 0; r < RPW; r++) red[w][j * RPW + r] = acc[j][r];
+      }
     }
     __syncthreads();
     if (sub == 0){
       #pragma unroll
-      for (int r = 0; r < RPW; r++){
-        float t = 0.f;
-        for (int q = 0; q < split; q++) t += red[grp * split + q][r];
-        acc[r] = t;
+      for (int j = 0; j < NC; j++){
+        #pragma unroll
+        for (int r = 0; r < RPW; r++){
+          float t = 0.f;
+          for (int q = 0; q < split; q++) t += red[grp * split + q][j * RPW + r];
+          acc[j][r] = t;
+        }
       }
     }
   }
   #pragma unroll
-  for (int r = 0; r < RPW; r++) acc_out[r] = acc[r];
+  for (int j = 0; j < NC; j++){
+    #pragma unroll
+    for (int r = 0; r < RPW; r++) acc_out[j * RPW + r] = acc[j][r];
+  }
   *row_out = (act && sub == 0 && lane == 0) ? row0 : -1;
 }
 
 // out = W · RMSNorm(h)。swiglu が 1 なら、行 2n（gate）と 2n+1（up）から out[n] = silu(gate) × up。1 つの組が 2 行。
+template <int NC>
+static __device__ __forceinline__ void rms_gemv_body(const float* __restrict__ h, int hstride, const float* __restrict__ nw, float eps,
+                                                     const wt_t* __restrict__ W, const unsigned short* __restrict__ S,
+                                                     float* __restrict__ out, int ostride, int N, int K, int swiglu, int split,
+                                                     int policy){
+  float acc[NC * 2]; int row0;
+  gemv_core<2, NC>(W, S, h, hstride, nw, eps, N, K, split, policy, acc, &row0);
+  if (row0 < 0) return;
+  #pragma unroll
+  for (int j = 0; j < NC; j++){
+    float* o = out + (size_t)j * ostride;
+    if (swiglu){ float g = acc[j * 2]; o[row0 >> 1] = g / (1.f + expf(-g)) * acc[j * 2 + 1]; }
+    else { o[row0] = acc[j * 2]; o[row0 + 1] = acc[j * 2 + 1]; }
+  }
+}
 extern "C" __global__ void rms_gemv(const float* __restrict__ h, const float* __restrict__ nw, float eps,
                                     const wt_t* __restrict__ W, const unsigned short* __restrict__ S,
                                     float* __restrict__ out, int N, int K, int swiglu, int split, int policy){
-  float acc[2]; int row0;
-  gemv_core<2>(W, S, h, nw, eps, N, K, split, policy, acc, &row0);
-  if (row0 < 0) return;
-  if (swiglu){ float g = acc[0]; out[row0 >> 1] = g / (1.f + expf(-g)) * acc[1]; }
-  else { out[row0] = acc[0]; out[row0 + 1] = acc[1]; }
+  rms_gemv_body<1>(h, 0, nw, eps, W, S, out, 0, N, K, swiglu, split, policy);
+}
+// 入力が 2 つの版（h + hstride と out + ostride が 2 つ目）。code predictor の位置 0 と 1 をまとめて通すのに使う
+extern "C" __global__ void rms_gemv2(const float* __restrict__ h, int hstride, const float* __restrict__ nw, float eps,
+                                     const wt_t* __restrict__ W, const unsigned short* __restrict__ S,
+                                     float* __restrict__ out, int ostride, int N, int K, int swiglu, int split, int policy){
+  rms_gemv_body<2>(h, hstride, nw, eps, W, S, out, ostride, N, K, swiglu, split, policy);
 }
 
 // out = W · x (+ bias)（accumulate が 1 なら out に足す）。1 つの組が 1 行。
+template <int NC>
+static __device__ __forceinline__ void gemv_body(const float* __restrict__ x, int xstride, const wt_t* __restrict__ W,
+                                                 const unsigned short* __restrict__ S, const float* __restrict__ bias,
+                                                 float* __restrict__ out, int ostride, int N, int K, int accumulate, int split,
+                                                 int policy){
+  float acc[NC]; int row;
+  gemv_core<1, NC>(W, S, x, xstride, nullptr, 0.f, N, K, split, policy, acc, &row);
+  if (row < 0) return;
+  #pragma unroll
+  for (int j = 0; j < NC; j++){
+    float* o = out + (size_t)j * ostride;
+    float v = acc[j];
+    if (bias) v += bias[row];
+    if (accumulate) v += o[row];
+    o[row] = v;
+  }
+}
 extern "C" __global__ void gemv(const float* __restrict__ x, const wt_t* __restrict__ W, const unsigned short* __restrict__ S,
                                 const float* __restrict__ bias, float* __restrict__ out, int N, int K, int accumulate,
                                 int split, int policy){
-  float acc[1]; int row;
-  gemv_core<1>(W, S, x, nullptr, 0.f, N, K, split, policy, acc, &row);
-  if (row < 0) return;
-  float v = acc[0];
-  if (bias) v += bias[row];
-  if (accumulate) v += out[row];
-  out[row] = v;
+  gemv_body<1>(x, 0, W, S, bias, out, 0, N, K, accumulate, split, policy);
+}
+extern "C" __global__ void gemv2(const float* __restrict__ x, int xstride, const wt_t* __restrict__ W,
+                                 const unsigned short* __restrict__ S, const float* __restrict__ bias, float* __restrict__ out,
+                                 int ostride, int N, int K, int accumulate, int split, int policy){
+  gemv_body<2>(x, xstride, W, S, bias, out, ostride, N, K, accumulate, split, policy);
 }
 
 // out = RMSNorm(h)（1 ブロック）。言語モデルの最後の隠れ状態（code predictor に渡す）を作る。
@@ -409,7 +485,7 @@ class Qwen3Kernels(Qwen3Fast):
     CUDA Graph の記録と再生、フレームの回し方は Qwen3Fast のまま。"""
 
     def __init__(self, tts, sampling: Sampling | None = None, max_cache: int = 1024, wd: str = "bf16", graphs: bool = True,
-                 sampler: str = "fused", l2_keep_mb: float | None = None):
+                 sampler: str = "fused", l2_keep_mb: float | None = None, cp_pair: bool | None = None):
         super().__init__(tts, sampling, max_cache=max_cache, compile=False, graphs=graphs)
         if sampler not in ("fused", "torch"):
             raise ValueError(sampler)
@@ -425,7 +501,9 @@ class Qwen3Kernels(Qwen3Fast):
             raise ValueError("wd=f32 は float32 のモデル、bf16・i8g32 は bfloat16 のモデルで使う")
         opts = ("-std=c++14",) + {"bf16": (), "i8g32": ("-DWD_I8G32",), "f32": ("-DWD_F32", "-DACT_F32")}[wd]
         mod = cp.RawModule(code=_SRC, options=opts)
-        self.k = {n: mod.get_function(n) for n in ("rms_gemv", "gemv", "rmsnorm", "embed", "talker_in", "attn")}
+        self.k = {n: mod.get_function(n) for n in ("rms_gemv", "gemv", "rms_gemv2", "gemv2", "rmsnorm", "embed", "talker_in", "attn")}
+        # code predictor の位置 0 と 1 をまとめて通すか（省いたら、まとめる）
+        self.cp_pair = True if cp_pair is None else bool(cp_pair)
         # L2 の大きさ（cudaDevAttrL2CacheSize）。l2_keep_mb を省いたら、L2 から 16 MiB 引いた分（96 MiB なら 80 MiB）にする
         self.l2_bytes = int(cp.cuda.runtime.deviceGetAttribute(38, self.device.index or 0))
         if l2_keep_mb is None:
@@ -473,14 +551,17 @@ class Qwen3Kernels(Qwen3Fast):
         f32 = dict(dtype=torch.float32, device=dev)
         self.ph32 = torch.zeros(Ht, **f32)       # 言語モデルの最後の隠れ状態（最後の RMSNorm のあと）
         self.ht = torch.zeros(Ht, **f32)         # 言語モデルの残差
-        self.hc = torch.zeros(Hc, **f32)         # code predictor の残差
+        # code predictor の残差など。2 行あり、ふだんは 1 行目（[1]）を使う。位置 0 と 1 をまとめて通すときは [0] が位置 0
+        self.hc2 = torch.zeros((2, Hc), **f32)
+        self.hc = self.hc2[1]
         self.e = torch.zeros(Ht, **f32)          # 埋め込みの 1 行（射影の前）
         self.qkv_t = torch.zeros((self.T.nq + 2 * self.T.nkv) * 128, **f32)
         self.att_t = torch.zeros(self.T.nq * 128, **f32)
         self.act_t = torch.zeros(self.T.I, **f32)
-        self.qkv_c = torch.zeros((self.C.nq + 2 * self.C.nkv) * 128, **f32)
-        self.att_c = torch.zeros(self.C.nq * 128, **f32)
-        self.act_c = torch.zeros(self.C.I, **f32)
+        self.qkv_c2 = torch.zeros((2, (self.C.nq + 2 * self.C.nkv) * 128), **f32)
+        self.att_c2 = torch.zeros((2, self.C.nq * 128), **f32)
+        self.act_c2 = torch.zeros((2, self.C.I), **f32)
+        self.qkv_c, self.att_c, self.act_c = self.qkv_c2[1], self.att_c2[1], self.act_c2[1]
         self.logit_c = torch.zeros((1, self.cp.config.vocab_size), **f32)
         self.logit_t = torch.zeros((1, self.V), **f32)
         bf = dict(dtype=self.dtype, device=dev)  # キャッシュと tts_pad の型はモデルと同じ
@@ -505,6 +586,36 @@ class Qwen3Kernels(Qwen3Fast):
                      (x, lin.w, lin.s, bias, out, np.int32(lin.N), np.int32(lin.K), np.int32(int(accumulate)),
                       np.int32(lin.split), np.int32(lin.pol)), smem=lin.K * 4)
 
+    def _rms_gemv2(self, h, nw, eps, lin: _Lin, out, swiglu: bool) -> None:
+        """入力が 2 つの版。h と out は [2, 長さ] の連続したテンソル。"""
+        self._launch("rms_gemv2", -(-lin.N // (8 // lin.split * 2)), 256,
+                     (h, np.int32(h.shape[1]), nw, np.float32(eps), lin.w, lin.s, out, np.int32(out.shape[1]), np.int32(lin.N),
+                      np.int32(lin.K), np.int32(int(swiglu)), np.int32(lin.split), np.int32(lin.pol)), smem=2 * lin.K * 4)
+
+    def _gemv2(self, x, lin: _Lin, out, accumulate: bool) -> None:
+        self._launch("gemv2", -(-lin.N // (8 // lin.split)), 256,
+                     (x, np.int32(x.shape[1]), lin.w, lin.s, None, out, np.int32(out.shape[1]), np.int32(lin.N), np.int32(lin.K),
+                      np.int32(int(accumulate)), np.int32(lin.split), np.int32(lin.pol)), smem=2 * lin.K * 4)
+
+    def _cp_layers_pair(self) -> None:
+        """code predictor の位置 0（hc2[0]）と位置 1（hc2[1]）をまとめて通す。GEMV は重みを 1 回読んで 2 つの入力に掛ける。
+        attn は位置 0、位置 1 の順に 1 つずつ。最後の層の o・gate/up・down は、位置 1 だけ（位置 0 の出力は使わない）。"""
+        P = self.C
+        for i, L in enumerate(P.layers):
+            self._rms_gemv2(self.hc2, L["in_norm"], P.eps, L["qkv"], self.qkv_c2, False)
+            for pos in (0, 1):
+                self._launch("attn", P.nkv, 256, (self.qkv_c2[pos], L["qn"], L["kn"], np.float32(P.eps), P.rope, self.ck[i],
+                                                  self.cv[i], None, np.int32(pos), np.int32(P.max_len), np.int32(P.nq),
+                                                  np.int32(P.nkv), self.att_c2[pos]), smem=2 * P.max_len * 4)
+            if i == len(P.layers) - 1:
+                self._gemv(self.att_c, L["o"], None, self.hc, True)
+                self._rms_gemv(self.hc, L["post_norm"], P.eps, L["gu"], self.act_c, True)
+                self._gemv(self.act_c, L["down"], None, self.hc, True)
+            else:
+                self._gemv2(self.att_c2, L["o"], self.hc2, True)
+                self._rms_gemv2(self.hc2, L["post_norm"], P.eps, L["gu"], self.act_c2, True)
+                self._gemv2(self.act_c2, L["down"], self.hc2, True)
+
     def _layers(self, P: _Stack, h, qkv, att, act, kcache, vcache, pos_ptr, pos_add: int) -> None:
         for i, L in enumerate(P.layers):
             self._rms_gemv(h, L["in_norm"], P.eps, L["qkv"], qkv, False)
@@ -515,13 +626,28 @@ class Qwen3Kernels(Qwen3Fast):
             self._rms_gemv(h, L["post_norm"], P.eps, L["gu"], act, True)
             self._gemv(act, L["down"], None, h, True)
 
-    def _cp_input(self, src_f32: torch.Tensor | None) -> None:
-        """code predictor の入力（hc）を作る。src_f32 は射影の前の値（言語モデルの幅）。None なら self.e を使う。"""
+    def _cp_input(self, src_f32: torch.Tensor | None, dst: torch.Tensor | None = None) -> None:
+        """code predictor の入力（dst。省いたら hc）を作る。src_f32 は射影の前の値（言語モデルの幅）。None なら self.e を使う。"""
         x = self.e if src_f32 is None else src_f32
+        dst = self.hc if dst is None else dst
         if self.proj is None:
-            self.hc.copy_(x)
+            dst.copy_(x)
         else:
-            self._gemv(x, self.proj[0], self.proj[1], self.hc, False)
+            self._gemv(x, self.proj[0], self.proj[1], dst, False)
+
+    def _cp_first(self, id0: torch.Tensor) -> None:
+        """code predictor の位置 0（言語モデルの最後の隠れ状態）と位置 1（第 0 のコード id0 の埋め込み）を通す。"""
+        if self.cp_pair:
+            self._cp_input(self.ph32, self.hc2[0])
+            self._launch("embed", 8, 256, (self.temb, id0, self.e, np.int32(self.T.H)))
+            self._cp_input(None)
+            self._cp_layers_pair()
+            return
+        self._cp_input(self.ph32)
+        self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, 0)
+        self._launch("embed", 8, 256, (self.temb, id0, self.e, np.int32(self.T.H)))
+        self._cp_input(None)
+        self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, 1)
 
     # --- 1 フレーム ---------------------------------------------------------------------------------------------
     def _after_prefill(self, hidden: torch.Tensor) -> None:
@@ -533,18 +659,14 @@ class Qwen3Kernels(Qwen3Fast):
         codes = self.codes
         cptr = codes.data_ptr()
         with st:
-            # code predictor の位置 0: 言語モデルの最後の隠れ状態
-            self._cp_input(self.ph32)
-            self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, 0)
-            # 位置 1: 第 0 のコードの埋め込み（言語モデルの表）
+            # code predictor の位置 0（言語モデルの最後の隠れ状態）と位置 1（第 0 のコードの埋め込み。言語モデルの表）
             codes[:, :1].copy_(self.id0)
-            self._launch("embed", 8, 256, (self.temb, self.id0, self.e, np.int32(self.T.H)))
-            self._cp_input(None)
+            self._cp_first(self.id0)
             for g in range(1, self.G):  # 位置 g で第 g のコードを作る（lm_head[g - 1]）
                 if g > 1:
                     self._launch("embed", 8, 256, (self.cemb[g - 2], np.uintp(cptr + 8 * (g - 1)), self.e, np.int32(self.T.H)))
                     self._cp_input(None)
-                self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, g)
+                    self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, g)
                 self._rms_gemv(self.hc, self.C.norm, self.C.eps, self.cp_heads[g - 1], self.logit_c, False)
                 if self.fs is not None:
                     self.fs(self.logit_c.view(-1), cptr + 8 * g, s.sub_do_sample, s.sub_temperature, s.sub_top_k)
@@ -608,16 +730,13 @@ class Qwen3Kernels(Qwen3Fast):
             self.codes.copy_(codes[f].view(1, -1).to(self.device))
             frame = []
             with st:
-                self._cp_input(self.ph32)
-                self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, 0)
+                self._cp_first(self.codes)
                 for g in range(1, self.G):
-                    if g == 1:
-                        self._launch("embed", 8, 256, (self.temb, self.codes, self.e, np.int32(self.T.H)))
-                    else:
+                    if g > 1:
                         self._launch("embed", 8, 256, (self.cemb[g - 2], np.uintp(cptr + 8 * (g - 1)), self.e,
                                                        np.int32(self.T.H)))
-                    self._cp_input(None)
-                    self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, g)
+                        self._cp_input(None)
+                        self._layers(self.C, self.hc, self.qkv_c, self.att_c, self.act_c, self.ck, self.cv, None, g)
                     self._rms_gemv(self.hc, self.C.norm, self.C.eps, self.cp_heads[g - 1], self.logit_c, False)
                     frame.append(self.logit_c.clone())
                 self.pos.fill_(L + f)

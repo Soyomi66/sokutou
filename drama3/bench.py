@@ -10,7 +10,8 @@ fish-speech の API サーバーと同じ順に呼ぶ: init_model（bf16、エ�
 --engine kernels では、generate_long_drama3 が呼ぶ generate_drama3 を drama3/kernels.py の Drama3Engine.generate に
 差し替える（文の区切り方と、前の区切りをプロンプトに入れるやり方は公式のまま）。--wd i8g32 で、エキスパートのほかの重みを
 int8 にする。--prefill-graphs と --prefix-cache は最初の入力を速くする（drama3/kernels.py の Drama3Engine.prefill）。
---drop-codec-masks で、コーデックの読まれない因果マスク（3 GiB）を空ける。
+--drop-codec-masks で、コーデックの読まれない因果マスク（3 GiB）を空ける。--cache-codec-masks で、復号のたびに作る
+窓つきのマスクを使い回す。
 サンプリングは --temperature 1.0、--top-p 0.9、--top-k 30（モデルカードと speech.cpp の既定。fish-speech の既定は
 0.7・0.7・30 なので、明示して渡す）。main token の繰り返しを引き直す処理は fish-speech の既定（RAS、reference_sampling なし）。
 --ref と --ref-text で参照を 1 本使う（コーデックで符号化したコードを使い回す。符号化の時間は 1 文の時間に入れない。
@@ -69,6 +70,8 @@ def parser() -> argparse.ArgumentParser:
                     help="kernels: 最初の入力を区切りごとに CUDA Graph にして、新しい順にこの数まで持つ（0: eager）")
     ap.add_argument("--prefix-cache", action="store_true",
                     help="kernels: 前の要求と頭が同じ行（参照）の Gated DeltaNet の状態を写して使い回す")
+    ap.add_argument("--cache-codec-masks", action="store_true",
+                    help="コーデックの窓つきのマスクを長さごとに残して使い回す（drama3/kernels.py の cache_codec_masks。値は同じ）")
     ap.add_argument("--drop-codec-masks", action="store_true",
                     help="コーデックの読まれない因果マスク（3 GiB）を空ける（drama3/kernels.py の drop_unused_codec_masks）")
     return ap
@@ -137,6 +140,10 @@ def run(args, model, codec, info: dict, engine=None) -> None:
         from kernels import drop_unused_codec_masks
 
         info["codec_masks_freed_gib"] = drop_unused_codec_masks(codec) / 2**30
+    if args.cache_codec_masks:
+        from kernels import cache_codec_masks
+
+        info["codec_masks_cached"] = cache_codec_masks(codec)
 
     def timed_generate(*a, **k):
         torch.cuda.synchronize()

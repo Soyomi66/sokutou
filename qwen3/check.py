@@ -117,6 +117,8 @@ def main() -> None:
     ap.add_argument("--wd", default="", help="--engine kernels の重みの型（bf16、i8g32、f32。既定はモデルの型）")
     ap.add_argument("--sampler", choices=["torch", "fused"], default="torch",
                     help="--engine kernels のサンプリング。公式と突き合わせるのは torch（fused は乱数が別なので一致しない）")
+    ap.add_argument("--cp-pair", choices=["auto", "on", "off"], default="auto",
+                    help="--engine kernels で code predictor の位置 0 と 1 をまとめて通すか（auto は on）")
     ap.add_argument("--max-new-tokens", type=int, default=400,
                     help="公式とエンジンの両方に渡す上限（公式の既定は 8192。終わりのトークンが出ないと長く続くため）")
     args = ap.parse_args()
@@ -148,7 +150,8 @@ def main() -> None:
                 from kernels import Qwen3Kernels
 
                 wd = args.wd or ("f32" if args.dtype == "float32" else "bf16")
-                eng = Qwen3Kernels(tts, Sampling.from_kwargs(kw), max_cache=args.max_cache, wd=wd, sampler=args.sampler)
+                eng = Qwen3Kernels(tts, Sampling.from_kwargs(kw), max_cache=args.max_cache, wd=wd, sampler=args.sampler,
+                                   cp_pair={"auto": None, "on": True, "off": False}[args.cp_pair])
             else:
                 eng = Qwen3Fast(tts, Sampling.from_kwargs(kw), max_cache=args.max_cache, compile=args.compile)
             del probe

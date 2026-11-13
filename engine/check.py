@@ -38,7 +38,7 @@ sys.path.insert(0, "/work")
 import irodori_tts.inference_runtime as IR  # noqa: E402
 from common import DEFAULT_STEPS, WORK, load_runtime, make_request, postprocess, set_num_steps, steps_tag  # noqa: E402
 from dump_reference import BLOCK_TRACE_STEPS, np32, stack  # noqa: E402
-from engine.fast import FastSampler, matmul_tf32, runtime_sampler_name  # noqa: E402
+from engine.fast import FastSampler, matmul_tf32, patch_tail, runtime_sampler_name  # noqa: E402
 
 
 def load(p: Path) -> dict[str, np.ndarray]:
@@ -107,6 +107,7 @@ def main() -> None:
     if args.global_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
     sampler_name = runtime_sampler_name(model)  # RF 版は sample_euler_rf_cfg、MF 版は sample_euler_meanflow
+    patch_tail()  # 通しの比較は、エンジンと同じ文末の探し方（engine/tail.py）で動かす
     official_sample = getattr(IR, sampler_name)
     got: dict = {}
     noise: dict = {}
@@ -122,8 +123,9 @@ def main() -> None:
     dec, wm = rt.codec.decode_latent, rt.watermarker.encode_batch
     bdec = None
     if args.bucket_decode:
-        from engine.decode import BucketDecoder
-        bdec = BucketDecoder(rt)
+        from engine.decode import make_bucket_decoder
+        bdec = make_bucket_decoder(rt)  # cupy があれば FusedBucketDecoder（出力は BucketDecoder と同じ）
+        print("bucket decoder:", type(bdec).__name__, flush=True)
 
     def decode(z):
         a = dec(z) if bdec is None else bdec.decode_latent(z)
